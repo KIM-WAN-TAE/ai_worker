@@ -1,0 +1,116 @@
+/**:
+  controller_manager:
+    ros__parameters:
+      update_rate: 100
+      use_sim_time: false
+
+      joint_state_broadcaster:
+        type: joint_state_broadcaster/JointStateBroadcaster
+
+      joint_trajectory_command_broadcaster:
+        type: joint_trajectory_command_broadcaster/JointTrajectoryCommandBroadcaster
+
+      spring_actuator_controller:
+        type: spring_actuator_controller/SpringActuatorController
+
+      joystick_controller:
+        type: joystick_controller/JoystickController
+
+/**:
+  joint_trajectory_command_broadcaster:
+    ros__parameters:
+      left_joints:
+        - arm_l_joint1
+        - arm_l_joint2
+        - arm_l_joint3
+        - arm_l_joint4
+        - arm_l_joint5
+        - arm_l_joint6
+        - arm_l_joint7
+        - gripper_l_joint1
+      left_offsets:
+        - 0.0
+        - 0.0
+        - 0.0
+        - 0.0
+        - 0.0
+        - 0.0
+        - 0.0
+        - 0.1
+      right_joints:
+        - arm_r_joint1
+        - arm_r_joint2
+        - arm_r_joint3
+        - arm_r_joint4
+        - arm_r_joint5
+        - arm_r_joint6
+        - arm_r_joint7
+        - gripper_r_joint1
+      right_offsets:
+        - 0.0
+        - 0.0
+        - 0.0
+        - 0.0
+        - 0.0
+        - 0.0
+        - 0.0
+        - 0.1
+      left_joint_states_stamped_topic: "/robot/arm_left_leader/joint_states"
+      right_joint_states_stamped_topic: "/robot/arm_right_leader/joint_states"
+      trigger_threshold: -0.5
+      save_pose_duration: 2.0
+      save_pose_ids: [3, 4]
+      # s r r s r s r
+      left_save_pose_3: [0.4310126487211491, 0.3037162117764516, 0.15187608222558382, -2.4574492064177025, -0.26688868864229087, 0.6856534595101655, -0.9479904508402741, 0.0]
+      right_save_pose_3: [0.4310126487211491, -0.3037162117764516, -0.15187608222558382, -2.4574492064177025, 0.26688868864229087, 0.6856534595101655, 0.9479904508402741, 0.0]
+      left_save_pose_4: [0.4310126487211491, 0.3037162117764516, 0.15187608222558382, -2.4574492064177025, -0.26688868864229087, 0.6856534595101655, -0.9479904508402741, 1.0]
+      right_save_pose_4: [0.4310126487211491, -0.3037162117764516, -0.15187608222558382, -2.4574492064177025, 0.26688868864229087, 0.6856534595101655, 0.9479904508402741, 1.0]
+
+/**:
+  spring_actuator_controller:
+    ros__parameters:
+      joints:
+        - gripper_l_joint1
+        - gripper_r_joint1
+      command_interfaces:
+        - effort
+      state_interfaces:
+        - position
+        - velocity
+      trigger_spring_stiffness: [0.06, 0.06]
+      trigger_neutral_position: [0.0, 0.0]
+      trigger_damping: [0.004, 0.004]
+      static_friction_scalars: [0.1, 0.1]
+      static_friction_velocity_thresholds: [0.3, 0.3]
+      torque_scaling_factors: [1.0, 1.0]
+
+/**:
+  joystick_controller:
+    ros__parameters:
+      joystick_sensors:
+        - sensorxel_l_joy
+        - sensorxel_r_joy
+      state_interfaces:
+        - JOYSTICK X VALUE
+        - JOYSTICK Y VALUE
+        - JOYSTICK TACT SWITCH
+      sensorxel_l_joy_reverse_interfaces:
+        - JOYSTICK Y VALUE
+        - JOYSTICK X VALUE
+      joystick_calibration_min: 0.0
+      joystick_calibration_center: 2048.0
+      joystick_calibration_max: 4096.0
+      sensorxel_l_joy_controlled_joints:
+        - head_joint1
+        - head_joint2
+      sensorxel_r_joy_controlled_joints:
+        - lift_joint
+      joint_states_topic: "/joint_states"
+      sensorxel_l_joy_joint_trajectory_topic: "/leader/joystick_controller_left/joint_trajectory"
+      sensorxel_r_joy_joint_trajectory_topic: "/leader/joystick_controller_right/joint_trajectory"
+      sensorxel_l_joy_joint_states_stamped_topic: "/robot/head_leader/joint_states"
+      sensorxel_r_joy_joint_states_stamped_topic: "/robot/lift_leader/joint_states"
+      sensorxel_l_joy_jog_scale: 0.06
+      sensorxel_r_joy_jog_scale: 0.01
+      deadzone: 1.0
+      enable_joystick_update: true
