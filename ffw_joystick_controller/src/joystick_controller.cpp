@@ -14,6 +14,7 @@
 
 #include <joystick_controller/joystick_controller.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <string>
 #include <stdexcept>
@@ -43,9 +44,6 @@ constexpr double ANGULAR_Z_SCALE = 2.0;
 const char LEFT_JOYSTICK_NAME[] = "sensorxel_l_joy";
 const char RIGHT_JOYSTICK_NAME[] = "sensorxel_r_joy";
 
-  // Mode names
-const char SWERVE_MODE[] = "swerve";
-const char ARM_CONTROL_MODE[] = "arm_control";
 }  // namespace constants
 
 JoystickController::JoystickController()
@@ -60,6 +58,9 @@ double JoystickController::normalize_joystick_value(double raw_adc, bool is_tact
     return raw_adc;
   }
 
+  // const double deadzone = std::clamp(params_.deadzone, 0.0, std::nextafter(1.0, 0.0));
+  const double deadzone = std::clamp(params_.deadzone, 0.0, 1.0);
+
   double normalized_value;
   if (raw_adc < params_.joystick_calibration_center) {
     normalized_value = -(params_.joystick_calibration_center - raw_adc) /
@@ -70,15 +71,15 @@ double JoystickController::normalize_joystick_value(double raw_adc, bool is_tact
   }
 
   // Apply deadzone
-  if (std::abs(normalized_value) < params_.deadzone) {
+  if (std::abs(normalized_value) <= deadzone) {
     return 0.0;
   }
 
-  // Normalize after deadzone
+  // Normalize after deadzone, normalized_value = [-1,1]
   if (normalized_value > 0) {
-    normalized_value = (normalized_value - params_.deadzone) / (1.0 - params_.deadzone);
+    normalized_value = (normalized_value - deadzone) / (1.0 - deadzone);
   } else {
-    normalized_value = (normalized_value + params_.deadzone) / (1.0 - params_.deadzone);
+    normalized_value = (normalized_value + deadzone) / (1.0 - deadzone);
   }
 
   return normalized_value;
@@ -173,9 +174,7 @@ void JoystickController::update_last_active_positions(
 
 std::vector<double> JoystickController::calculate_joint_positions(
   const std::vector<std::string> & controlled_joints,
-  const std::vector<double> & normalized_values,
   const std::string & sensor_name,
-  bool swerve_mode,
   const JoystickValues & joystick_values) const
 {
   std::vector<double> positions;
@@ -187,17 +186,10 @@ std::vector<double> JoystickController::calculate_joint_positions(
     if (it != current_joint_states_.name.end()) {
       size_t index = std::distance(current_joint_states_.name.begin(), it);
       double current_position = current_joint_states_.position[index];
-      double sensorxel_joy_value;
 
-      if (swerve_mode) {
-        // Use right joystick X-axis for lift control in swerve mode
-        sensorxel_joy_value = (sensor_name ==
-          constants::RIGHT_JOYSTICK_NAME) ? joystick_values.right_x : 0.0;
-      } else {
-        // Normal mode: use appropriate axis based on joint index
-        sensorxel_joy_value = (state_interface_types_.size() > 1 &&
-          i == 1) ? normalized_values[1] : normalized_values[0];
-      }
+      // Use right joystick X-axis for lift control; left joystick drives cmd_vel only.
+      double sensorxel_joy_value = (sensor_name ==
+        constants::RIGHT_JOYSTICK_NAME) ? joystick_values.right_x : 0.0;
 
       double new_position = current_position + sensorxel_joy_value *
         sensor_jog_scale_.at(sensor_name);
@@ -234,21 +226,36 @@ void JoystickController::publish_joint_trajectory(
   }
 }
 
-void JoystickController::publish_cmd_vel(bool swerve_mode, const JoystickValues & joystick_values)
+void JoystickController::publish_joint_state(
+  const std::vector<std::string> & controlled_joints,
+  const std::vector<double> & positions,
+  const std::string & sensor_name,
+  const rclcpp::Time & time)
+{
+  auto joint_state_msg = sensor_msgs::msg::JointState();
+  joint_state_msg.header.stamp = time;
+  joint_state_msg.header.frame_id = "";
+  joint_state_msg.name = controlled_joints;
+  joint_state_msg.position = positions;
+  // Set velocity and effort to NaN (not available from joystick)
+  joint_state_msg.velocity.resize(positions.size(), std::numeric_limits<double>::quiet_NaN());
+  joint_state_msg.effort.resize(positions.size(), std::numeric_limits<double>::quiet_NaN());
+
+  auto joint_state_publisher = sensor_joint_state_stamped_publisher_[sensor_name];
+  if (joint_state_publisher) {
+    joint_state_publisher->publish(joint_state_msg);
+  } else {
+    RCLCPP_WARN(get_node()->get_logger(),
+        "Joint state publisher not found for sensor: %s", sensor_name.c_str());
+  }
+}
+
+void JoystickController::publish_cmd_vel(const JoystickValues & joystick_values)
 {
   geometry_msgs::msg::Twist twist_msg;
-
-  if (swerve_mode) {
-    twist_msg.linear.x = -joystick_values.left_x / constants::LINEAR_X_SCALE;
-    twist_msg.linear.y = joystick_values.left_y / constants::LINEAR_Y_SCALE;
-    twist_msg.angular.z = -joystick_values.right_y / constants::ANGULAR_Z_SCALE;
-  } else {
-    // Zero twist when not in swerve mode
-    twist_msg.linear.x = 0.0;
-    twist_msg.linear.y = 0.0;
-    twist_msg.angular.z = 0.0;
-  }
-
+  twist_msg.linear.x = -joystick_values.left_x / constants::LINEAR_X_SCALE;
+  twist_msg.linear.y = joystick_values.left_y / constants::LINEAR_Y_SCALE;
+  twist_msg.angular.z = -joystick_values.right_y / constants::ANGULAR_Z_SCALE;
   cmd_vel_pub_->publish(twist_msg);
 }
 
@@ -305,55 +312,59 @@ void JoystickController::handle_tact_switches(
     auto press_duration = current_time - right_tact_press_start_time_;
     if (press_duration.seconds() >= params_.long_press_duration) {
       std_msgs::msg::String trigger_msg;
-      trigger_msg.data = "right_long_time";
+      trigger_msg.data = middle_pedal_held_ ? "right_long_time_middle" : "right_long_time";
       tact_trigger_pub_->publish(trigger_msg);
-      RCLCPP_INFO(get_node()->get_logger(), "Right tact switch long press triggered!");
+      RCLCPP_INFO(
+        get_node()->get_logger(), "Right tact switch long press triggered! (middle: %s)",
+        middle_pedal_held_ ? "held" : "not held");
       right_tact_long_press_triggered_ = true;
     }
   }
 
-  // Set flag when both buttons are pressed
-  if (current_state == 3) {
-    both_pressed_flag_ = true;
-  }
-
   // Only trigger actions when reaching 00 state (no buttons pressed)
   if (current_state == 0 && prev_state != 0) {
-    if (both_pressed_flag_) {
-      // Mode change - both buttons were pressed at some point
-      std_msgs::msg::String mode_msg;
-      if (current_mode_ == constants::ARM_CONTROL_MODE) {
-        current_mode_ = constants::SWERVE_MODE;
-      } else {
-        current_mode_ = constants::ARM_CONTROL_MODE;
-      }
-      mode_msg.data = current_mode_;
-      mode_pub_->publish(mode_msg);
-      RCLCPP_INFO(get_node()->get_logger(), "Mode switched to: %s", current_mode_.c_str());
-
-      // Reset flag after mode change
-      both_pressed_flag_ = false;
-    } else {
-      // Individual button trigger - only if both were never pressed and not long press
-      switch (prev_state) {
-        case 1:  // 01 -> 00 (right button only was pressed)
-          if (!right_tact_long_press_triggered_) {
+    switch (prev_state) {
+      case 1:  // 01 -> 00 (right button only was pressed)
+        if (!right_tact_long_press_triggered_) {
+          if (middle_pedal_held_) {
             std_msgs::msg::String trigger_msg;
             trigger_msg.data = "right";
             tact_trigger_pub_->publish(trigger_msg);
-            RCLCPP_INFO(get_node()->get_logger(), "Right tact switch triggered!");
+            RCLCPP_INFO(get_node()->get_logger(), "Right tact trigger (middle pedal held)");
+          } else {
+            std_msgs::msg::UInt8 enable_msg;
+            enable_msg.data = 2;
+            right_enable_pub_->publish(enable_msg);
+            RCLCPP_INFO(get_node()->get_logger(), "Right toggle pub");
           }
-          break;
+        }
+        break;
 
-        case 2:  // 10 -> 00 (left button only was pressed)
-          if (!left_tact_long_press_triggered_) {
+      case 2:  // 10 -> 00 (left button only was pressed)
+        if (!left_tact_long_press_triggered_) {
+          if (middle_pedal_held_) {
             std_msgs::msg::String trigger_msg;
             trigger_msg.data = "left";
             tact_trigger_pub_->publish(trigger_msg);
-            RCLCPP_INFO(get_node()->get_logger(), "Left tact switch triggered!");
+            RCLCPP_INFO(get_node()->get_logger(), "Left tact trigger (middle pedal held)");
+          } else {
+            std_msgs::msg::UInt8 enable_msg;
+            enable_msg.data = 2;
+            left_enable_pub_->publish(enable_msg);
+            RCLCPP_INFO(get_node()->get_logger(), "Left toggle pub");
           }
-          break;
-      }
+        }
+        break;
+
+      case 3:  // 11 -> 00 (both buttons were pressed)
+        if ((!left_tact_long_press_triggered_) && (!right_tact_long_press_triggered_)) {
+          std_msgs::msg::UInt8 enable_msg;
+          enable_msg.data = 2;
+          left_enable_pub_->publish(enable_msg);
+          right_enable_pub_->publish(enable_msg);
+          RCLCPP_INFO(get_node()->get_logger(), "both toggle pub");
+        }
+        break;
     }
 
     // Reset long press flags when buttons are released
@@ -368,7 +379,6 @@ void JoystickController::handle_tact_switches(
   // Update previous state
   prev_left_tact_switch_ = left_tact_pressed;
   prev_right_tact_switch_ = right_tact_pressed;
-  prev_tact_switch_ = (current_state == 3);
 }
 
 controller_interface::InterfaceConfiguration
@@ -427,7 +437,11 @@ controller_interface::return_type JoystickController::update(
     return controller_interface::return_type::OK;
   }
 
-  bool swerve_mode = (current_mode_ == constants::SWERVE_MODE);
+  if (param_listener_->is_old(params_)) {
+    params_ = param_listener_->get_params();
+  }
+
+  const bool joystick_update_enabled = params_.enable_joystick_update;
   JoystickValues joystick_values;
   bool left_tact_switch_pressed = false;
   bool right_tact_switch_pressed = false;
@@ -440,12 +454,27 @@ controller_interface::return_type JoystickController::update(
     const auto & controlled_joints = sensor_controlled_joints_[sensor_name];
     auto & last_active_positions = sensor_last_active_positions_[sensor_name];
 
-    // Read and normalize sensor values
+    // Read all joystick interfaces so tact-switch features still work even when motion is disabled.
     std::vector<double> normalized_values = read_and_normalize_sensor_values(sensor_idx);
+    if (!joystick_update_enabled) {
+      for (size_t j = 0; j < normalized_values.size(); ++j) {
+        if (j != constants::TACT_SWITCH_INTERFACE_INDEX) {
+          normalized_values[j] = 0.0;
+        }
+      }
+    }
 
-    // Check if any joystick is active
-    bool any_sensorxel_joy_active = std::any_of(normalized_values.begin(), normalized_values.end(),
-        [](double value) {return std::abs(value) > 0.0;});
+    // Motion activity only depends on joystick axes, not the tact switch state.
+    bool any_sensorxel_joy_active = false;
+    for (size_t j = 0; j < normalized_values.size(); ++j) {
+      if (j == constants::TACT_SWITCH_INTERFACE_INDEX) {
+        continue;
+      }
+      if (std::abs(normalized_values[j]) > 0.0) {
+        any_sensorxel_joy_active = true;
+        break;
+      }
+    }
 
     // Update joystick values
     update_joystick_values(sensor_name, normalized_values, joystick_values,
@@ -469,13 +498,14 @@ controller_interface::return_type JoystickController::update(
     }
 
     // Publish joint trajectory
-    if (!current_joint_states_.name.empty() && !controlled_joints.empty()) {
+    if (
+      joystick_update_enabled && !current_joint_states_.name.empty() && !controlled_joints.empty())
+    {
       std::vector<double> positions;
 
-      if (swerve_mode || any_sensorxel_joy_active) {
-        positions = calculate_joint_positions(controlled_joints, normalized_values,
-                                           sensor_name, swerve_mode, joystick_values);
-        // Update last active positions with new positions
+      if (any_sensorxel_joy_active) {
+        positions = calculate_joint_positions(
+          controlled_joints, sensor_name, joystick_values);
         for (size_t i = 0; i < positions.size() && i < last_active_positions.size(); ++i) {
           last_active_positions[i] = positions[i];
         }
@@ -486,17 +516,21 @@ controller_interface::return_type JoystickController::update(
       publish_joint_trajectory(controlled_joints, positions, sensor_name);
     }
 
+    // Publish joint state with timestamp from update() function
+    if (!current_joint_states_.name.empty() && !controlled_joints.empty()) {
+      publish_joint_state(controlled_joints, last_active_positions, sensor_name, time);
+    }
+
     was_active_ = any_sensorxel_joy_active;
     sensorxel_joy_values_[sensor_idx] = normalized_values;
   }
 
   // Publish cmd_vel
-  publish_cmd_vel(swerve_mode, joystick_values);
+  publish_cmd_vel(joystick_values);
 
   // Publish joystick values
   publish_joystick_values();
 
-  // Handle all tact switch functionality (mode switching and individual triggers)
   handle_tact_switches(left_tact_switch_pressed, right_tact_switch_pressed, time);
 
   RCLCPP_DEBUG(get_node()->get_logger(), "Joystick controller update completed");
@@ -533,6 +567,18 @@ controller_interface::CallbackReturn JoystickController::on_configure(
 
   // get parameters from the listener in case they were updated
   params_ = param_listener_->get_params();
+
+  if (params_.deadzone < 0.0 || params_.deadzone > 1.0) {
+    RCLCPP_ERROR(
+      logger,
+      "Invalid deadzone %.3f. 'deadzone' must be in the range [0.0, 1.0).",
+      params_.deadzone);
+    return controller_interface::CallbackReturn::ERROR;
+  }
+
+  if (!params_.enable_joystick_update) {
+    RCLCPP_INFO(logger, "Joystick updates are disabled by parameter.");
+  }
 
   // Get sensorxel_joy sensor names from parameters
   sensorxel_joy_names_ = params_.joystick_sensors;
@@ -574,6 +620,14 @@ controller_interface::CallbackReturn JoystickController::on_configure(
     } else {
       RCLCPP_WARN(get_node()->get_logger(), "parameter: %s not found", topic_param.c_str());
     }
+    // joint_states_stamped_topic
+    std::string joint_state_topic_param = sensor_name + "_joint_states_stamped_topic";
+    if (get_node()->has_parameter(joint_state_topic_param)) {
+      sensor_joint_state_stamped_topic_[sensor_name] =
+        get_node()->get_parameter(joint_state_topic_param).as_string();
+    } else {
+      sensor_joint_state_stamped_topic_[sensor_name] = "";
+    }
     // jog_scale
     std::string jog_scale_param = sensor_name + "_jog_scale";
     if (get_node()->has_parameter(jog_scale_param)) {
@@ -599,6 +653,27 @@ controller_interface::CallbackReturn JoystickController::on_configure(
     sensor_joint_trajectory_publisher_[sensor_name] =
       get_node()->create_publisher<trajectory_msgs::msg::JointTrajectory>(
       sensor_joint_trajectory_topic_[sensor_name], rclcpp::SystemDefaultsQoS());
+
+    // Create joint state publisher for this sensor with timestamp from update() function
+    std::string joint_state_topic_name = sensor_joint_state_stamped_topic_[sensor_name];
+    if (joint_state_topic_name.empty()) {
+      joint_state_topic_name = sensor_joint_trajectory_topic_[sensor_name];
+      // Replace "joint_trajectory" with "joint_states_stamped" in topic name
+      size_t pos = joint_state_topic_name.find("joint_trajectory");
+      if (pos != std::string::npos) {
+        joint_state_topic_name.replace(pos, std::string("joint_trajectory").length(),
+            "joint_states_stamped");
+      } else {
+        // Fallback: append "_joint_states_stamped" if pattern not found
+        joint_state_topic_name += "_joint_states_stamped";
+      }
+    }
+    sensor_joint_state_stamped_publisher_[sensor_name] =
+      get_node()->create_publisher<sensor_msgs::msg::JointState>(
+      joint_state_topic_name, rclcpp::SystemDefaultsQoS());
+    RCLCPP_INFO(get_node()->get_logger(),
+        "Created joint state stamped publisher for sensor: %s, topic: %s",
+        sensor_name.c_str(), joint_state_topic_name.c_str());
   }
 
   // Create subscriber for joint states
@@ -608,17 +683,18 @@ controller_interface::CallbackReturn JoystickController::on_configure(
     params_.joint_states_topic, rclcpp::SystemDefaultsQoS(),
     std::bind(&JoystickController::joint_states_callback, this, std::placeholders::_1));
 
-  // Create publisher for mode
-  mode_pub_ = get_node()->create_publisher<std_msgs::msg::String>(
-    "/leader/joystick_controller_right/joystick_mode", 10);
-  prev_tact_switch_ = false;
-
   // Create publisher for right tact switch trigger
   tact_trigger_pub_ = get_node()->create_publisher<std_msgs::msg::String>(
     "/leader/joystick_controller/tact_trigger", 10);
+
+  // Create publishers for left/right enable (0=disable, 1=enable, 2=toggle)
+  left_enable_pub_ = get_node()->create_publisher<std_msgs::msg::UInt8>(
+    "/leader/left_command", 1);
+  right_enable_pub_ = get_node()->create_publisher<std_msgs::msg::UInt8>(
+    "/leader/right_command", 1);
+
   prev_right_tact_switch_ = false;
   prev_left_tact_switch_ = false;
-  both_pressed_flag_ = false;
 
   // Initialize long press variables
   left_tact_long_press_triggered_ = false;
@@ -628,6 +704,13 @@ controller_interface::CallbackReturn JoystickController::on_configure(
 
   // Create publisher for cmd_vel
   cmd_vel_pub_ = get_node()->create_publisher<geometry_msgs::msg::Twist>("/cmd_vel", 10);
+
+  // Subscribe to foot switch middle pedal state
+  middle_pedal_sub_ = get_node()->create_subscription<std_msgs::msg::Bool>(
+    "/leader/foot_switch/middle_pedal", 10,
+    [this](const std_msgs::msg::Bool::SharedPtr msg) {
+      middle_pedal_held_ = msg->data;
+    });
 
   RCLCPP_INFO(get_node()->get_logger(), "JoystickController configured successfully.");
   return CallbackReturn::SUCCESS;

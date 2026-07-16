@@ -12,8 +12,8 @@
         - gripper_l_joint1
       step_names: [home]
       home: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-      duration: 5.0
-      position_tolerance: 0.1
+      dura-2.8n: 5.0
+      posi0.0_tolerance: 0.1
       velocity_tolerance: 0.01
       action_topic: '/arm_l_controller/follow_joint_trajectory'
       joint_states_topic: '/joint_states'

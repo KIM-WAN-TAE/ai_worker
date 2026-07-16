@@ -28,12 +28,13 @@
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp_lifecycle/node_interfaces/lifecycle_node_interface.hpp"
 #include "rclcpp_lifecycle/state.hpp"
+#include "std_msgs/msg/bool.hpp"
 #include "std_msgs/msg/float64_multi_array.hpp"
 #include "sensor_msgs/msg/joint_state.hpp"
 #include "trajectory_msgs/msg/joint_trajectory.hpp"
 #include "std_msgs/msg/string.hpp"
+#include "std_msgs/msg/u_int8.hpp"
 #include "geometry_msgs/msg/twist.hpp"
-
 namespace joystick_controller
 {
 
@@ -104,15 +105,18 @@ protected:
   void update_last_active_positions(const std::vector<std::string> & controlled_joints);
   std::vector<double> calculate_joint_positions(
     const std::vector<std::string> & controlled_joints,
-    const std::vector<double> & normalized_values,
     const std::string & sensor_name,
-    bool swerve_mode,
     const JoystickValues & joystick_values) const;
   void publish_joint_trajectory(
     const std::vector<std::string> & controlled_joints,
     const std::vector<double> & positions,
     const std::string & sensor_name);
-  void publish_cmd_vel(bool swerve_mode, const JoystickValues & joystick_values);
+  void publish_joint_state(
+    const std::vector<std::string> & controlled_joints,
+    const std::vector<double> & positions,
+    const std::string & sensor_name,
+    const rclcpp::Time & time);
+  void publish_cmd_vel(const JoystickValues & joystick_values);
   void publish_joystick_values();
   void handle_tact_switches(
     bool left_tact_pressed, bool right_tact_pressed, const rclcpp::Time & current_time);
@@ -130,10 +134,14 @@ protected:
   std::map<std::string, std::vector<std::string>> sensor_controlled_joints_;
   std::map<std::string, std::vector<std::string>> sensor_reverse_interfaces_;
   std::map<std::string, std::string> sensor_joint_trajectory_topic_;
+  std::map<std::string, std::string> sensor_joint_state_stamped_topic_;
   std::map<std::string, std::vector<double>> sensor_last_active_positions_;
   std::map<std::string,
     rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr>
   sensor_joint_trajectory_publisher_;
+  std::map<std::string,
+    rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr>
+  sensor_joint_state_stamped_publisher_;
   std::map<std::string,
     rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr> sensorxel_joy_publisher_;
 
@@ -145,12 +153,8 @@ protected:
   std::shared_ptr<ParamListener> param_listener_;
   Params params_;
 
-  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr mode_pub_;
-  std::string current_mode_ = "arm_control";
-  bool prev_tact_switch_ = false;
   bool prev_right_tact_switch_ = false;
   bool prev_left_tact_switch_ = false;
-  bool both_pressed_flag_ = false;  // Flag to track if both buttons were pressed
 
   // Long press functionality
   rclcpp::Time left_tact_press_start_time_;
@@ -160,6 +164,11 @@ protected:
 
   rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr tact_trigger_pub_;
+  rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr left_enable_pub_;
+  rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr right_enable_pub_;
+
+  bool middle_pedal_held_ = false;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr middle_pedal_sub_;
 };
 
 }  // namespace joystick_controller

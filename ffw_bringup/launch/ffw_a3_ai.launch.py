@@ -37,15 +37,27 @@ def generate_launch_description():
             description='Use mock hardware mirroring command.',
         ),
         DeclareLaunchArgument(
+            'port_name',
+            default_value='/dev/serial/by-id/usb-ROBOTIS_STM32_Virtual_ComPort_3151388A3434-if00',
+            description='Serial port for the A3 leader Dynamixel bus.',
+        ),
+        DeclareLaunchArgument(
             'launch_foot_switch',
-            default_value='true',
+            default_value='false',
             description='Whether to launch the foot switch node.',
+        ),
+        DeclareLaunchArgument(
+            'launch_gripper_trigger',
+            default_value='true',
+            description='Whether to launch the gripper save-pose trigger node.',
         ),
     ]
 
     description_file = LaunchConfiguration('description_file')
     use_mock_hardware = LaunchConfiguration('use_mock_hardware')
+    port_name = LaunchConfiguration('port_name')
     launch_foot_switch = LaunchConfiguration('launch_foot_switch')
+    launch_gripper_trigger = LaunchConfiguration('launch_gripper_trigger')
 
     # Robot controllers config file path
     robot_controllers = PathJoinSubstitution(
@@ -74,6 +86,8 @@ def generate_launch_description():
             ),
             ' ',
             'use_mock_hardware:=', use_mock_hardware,
+            ' ',
+            'port_name:=', port_name,
         ]
     )
     robot_description = {'robot_description': robot_description_content}
@@ -112,6 +126,7 @@ def generate_launch_description():
         name='gripper_trigger',
         output='both',
         parameters=[{'gripper_threshold': -0.5}],
+        condition=IfCondition(launch_gripper_trigger),
     )
 
     # Wrap everything in a namespace 'leader'

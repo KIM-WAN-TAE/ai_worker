@@ -74,6 +74,18 @@ joystick_controller:
     description: "Topic to publish joint trajectory commands",
     read_only: true
   }
+  sensorxel_l_joy_joint_states_stamped_topic: {
+    type: string,
+    default_value: "",
+    description: "Topic to publish stamped joint states for the left joystick. If empty, derive from the joint trajectory topic.",
+    read_only: true
+  }
+  sensorxel_r_joy_joint_states_stamped_topic: {
+    type: string,
+    default_value: "",
+    description: "Topic to publish stamped joint states for the right joystick. If empty, derive from the joint trajectory topic.",
+    read_only: true
+  }
   sensorxel_l_joy_jog_scale: {
     type: double,
     default_value: 0.1,
@@ -89,7 +101,13 @@ joystick_controller:
   deadzone: {
     type: double,
     default_value: 0.05,
-    description: "Deadzone around center position (0.0 to 1.0)",
+    description: "Deadzone around center position [0.0, 1.0)",
+    read_only: false
+  }
+  enable_joystick_update: {
+    type: bool,
+    default_value: true,
+    description: "Enable joystick X/Y motion updates and trajectory publishing while keeping tact-switch features active.",
     read_only: true
   }
   long_press_duration: {

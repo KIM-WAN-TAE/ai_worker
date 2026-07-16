@@ -14,10 +14,12 @@
 
 #include "joint_trajectory_command_broadcaster/joint_trajectory_command_broadcaster.hpp"
 
+#include <chrono>
 #include <cstddef>
 #include <limits>
 #include <memory>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 #include <functional>
@@ -29,6 +31,7 @@
 #include "rclcpp/qos.hpp"
 #include "rclcpp/time.hpp"
 #include "std_msgs/msg/header.hpp"
+#include "std_msgs/msg/string.hpp"
 #include "trajectory_msgs/msg/joint_trajectory.hpp"
 #include "sensor_msgs/msg/joint_state.hpp"
 #include "urdf/model.h"
@@ -41,7 +44,9 @@ class State;
 namespace joint_trajectory_command_broadcaster
 {
 const auto kUninitializedValue = std::numeric_limits<double>::quiet_NaN();
+using hardware_interface::HW_IF_EFFORT;
 using hardware_interface::HW_IF_POSITION;
+using hardware_interface::HW_IF_VELOCITY;
 
 JointTrajectoryCommandBroadcaster::JointTrajectoryCommandBroadcaster() {}
 
@@ -133,6 +138,7 @@ controller_interface::CallbackReturn JointTrajectoryCommandBroadcaster::on_confi
         group_reverse_joints_[group_name] = std::vector<std::string>();
       }
 
+
       // Create topic name with group-specific namespace
       std::string topic_name;
       topic_name = "joint_trajectory_command_broadcaster_" + group_name + "/joint_trajectory";
@@ -151,21 +157,145 @@ controller_interface::CallbackReturn JointTrajectoryCommandBroadcaster::on_confi
         get_node()->get_logger(),
         "Created joint trajectory publisher for group '%s' on topic: %s with %zu joints",
         group_name.c_str(), topic_name.c_str(), group_joints.size());
+
+      // Create joint state publisher for this group with timestamp from update() function
+      std::string joint_state_topic_name;
+      if (group_name == "left" && !params_.left_joint_states_stamped_topic.empty()) {
+        joint_state_topic_name = params_.left_joint_states_stamped_topic;
+      } else if (group_name == "right" && !params_.right_joint_states_stamped_topic.empty()) {
+        joint_state_topic_name = params_.right_joint_states_stamped_topic;
+      } else {
+        joint_state_topic_name =
+          "joint_trajectory_command_broadcaster_" + group_name + "/joint_states_stamped";
+      }
+      joint_state_stamped_publishers_[group_name] =
+        get_node()->create_publisher<sensor_msgs::msg::JointState>(
+        joint_state_topic_name, rclcpp::SystemDefaultsQoS());
+
+      realtime_joint_state_stamped_publishers_[group_name] =
+        std::make_shared<realtime_tools::RealtimePublisher<sensor_msgs::msg::JointState>>(
+        joint_state_stamped_publishers_[group_name]);
+
+      RCLCPP_INFO(
+        get_node()->get_logger(),
+        "Created joint state stamped publisher for group '%s' on topic: %s",
+        group_name.c_str(), joint_state_topic_name.c_str());
     }
 
     // Store the groups for later use
     trajectory_groups_ = groups;
 
-    // Create subscriber for follower joint states
-    joint_states_subscriber_ = get_node()->create_subscription<sensor_msgs::msg::JointState>(
-      params_.follower_joint_states_topic, rclcpp::SystemDefaultsQoS(),
-      std::bind(&JointTrajectoryCommandBroadcaster::joint_states_callback, this,
-        std::placeholders::_1));
+    // Initialize group runtimes with mode from parameters
+    for (const auto & group_name : trajectory_groups_) {
+      bool init_enabled = (group_name == "left") ?
+        params_.left_enabled_init : params_.right_enabled_init;
+      group_runtime_[group_name].mode = init_enabled ? Mode::TELEOP : Mode::IDLE;
+    }
+    RCLCPP_INFO(get_node()->get_logger(),
+      "Initial mode: left=%s, right=%s",
+      params_.left_enabled_init ? "TELEOP" : "IDLE",
+      params_.right_enabled_init ? "TELEOP" : "IDLE");
 
-    RCLCPP_INFO(
-      get_node()->get_logger(),
-      "Subscribed to follower joint states topic: %s",
-      params_.follower_joint_states_topic.c_str());
+    // Load save poses per group from parameters (left_save_pose_<id> / right_save_pose_<id>)
+    for (int64_t id : params_.save_pose_ids) {
+      for (const auto & group_name : trajectory_groups_) {
+        std::string pname = group_name + "_save_pose_" + std::to_string(id);
+        if (!get_node()->has_parameter(pname)) {
+          get_node()->declare_parameter(pname, std::vector<double>{});
+        }
+        auto values = get_node()->get_parameter(pname).as_double_array();
+        if (!values.empty()) {
+          group_save_poses_[group_name][static_cast<uint8_t>(id)] = values;
+          RCLCPP_INFO(get_node()->get_logger(),
+            "Loaded %s (%zu values)", pname.c_str(), values.size());
+        }
+      }
+    }
+
+    // One-shot follower subscriptions: init last_target once, then ignore
+    for (const auto & group_name : trajectory_groups_) {
+      group_last_target_initialized_[group_name] = false;
+    }
+
+    auto make_follower_cb = [this](const std::string & group_name) {
+      return [this, group_name](sensor_msgs::msg::JointState::SharedPtr msg) {
+        if (group_last_target_initialized_[group_name]) {
+          return;
+        }
+        const auto & joints = group_joint_names_[group_name];
+        if (joints.empty()) {
+          return;
+        }
+        std::vector<double> positions(joints.size(), kUninitializedValue);
+        std::vector<std::string> missing_joints;
+        const size_t n = std::min(msg->name.size(), msg->position.size());
+        for (size_t i = 0; i < joints.size(); ++i) {
+          for (size_t j = 0; j < n; ++j) {
+            if (msg->name[j] == joints[i]) {
+              positions[i] = msg->position[j];
+              break;
+            }
+          }
+          if (std::isnan(positions[i])) {
+            missing_joints.push_back(joints[i]);
+          }
+        }
+        if (!missing_joints.empty()) {
+          RCLCPP_WARN_THROTTLE(
+            get_node()->get_logger(), *get_node()->get_clock(), 2000,
+            "[%s] waiting for follower joint_states on topic with required joints; "
+            "missing %zu/%zu joints, first missing: %s",
+            group_name.c_str(), missing_joints.size(), joints.size(), missing_joints.front().c_str());
+          return;
+        }
+        group_last_target_[group_name] = positions;
+        group_last_target_initialized_[group_name] = true;
+        RCLCPP_INFO(get_node()->get_logger(),
+          "[%s] last_target initialized from follower joint_states using joint-name order",
+          group_name.c_str());
+      };
+    };
+
+    left_follower_js_sub_ = get_node()->create_subscription<sensor_msgs::msg::JointState>(
+      params_.left_follower_joint_states_topic, rclcpp::SystemDefaultsQoS(),
+      make_follower_cb("left"));
+    right_follower_js_sub_ = get_node()->create_subscription<sensor_msgs::msg::JointState>(
+      params_.right_follower_joint_states_topic, rclcpp::SystemDefaultsQoS(),
+      make_follower_cb("right"));
+
+    // Enable topic subscriptions
+    //   0=disable, 1=enable, 2=toggle, 3+=disable + trigger save pose <N>
+    left_enable_sub_ = get_node()->create_subscription<std_msgs::msg::UInt8>(
+      "/leader/left_command", rclcpp::SystemDefaultsQoS(),
+      [this](std_msgs::msg::UInt8::SharedPtr msg) {
+        handle_enable_msg("left", msg->data);
+      });
+
+    right_enable_sub_ = get_node()->create_subscription<std_msgs::msg::UInt8>(
+      "/leader/right_command", rclcpp::SystemDefaultsQoS(),
+      [this](const std_msgs::msg::UInt8::SharedPtr msg) {
+        handle_enable_msg("right", msg->data);
+      });
+
+    // Block until follower joint_states init last_target for every group
+    while (rclcpp::ok()) {
+      bool all_init = true;
+      for (const auto & g : trajectory_groups_) {
+        if (!group_last_target_initialized_[g]) {
+          all_init = false;
+          break;
+        }
+      }
+      if (all_init) {
+        break;
+      }
+      RCLCPP_WARN_THROTTLE(
+        get_node()->get_logger(), *get_node()->get_clock(), 2000,
+        "Waiting for follower joint_states to initialize last_target...");
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+
+    RCLCPP_INFO(get_node()->get_logger(), "Controller configured successfully.");
   } catch (const std::exception & e) {
     // get_node() may throw, logging raw here
     fprintf(stderr, "Exception thrown during init stage with message: %s \n", e.what());
@@ -179,6 +309,60 @@ controller_interface::CallbackReturn JointTrajectoryCommandBroadcaster::on_confi
       get_node()->get_logger(),
       "Failed to parse robot description. Will proceed without URDF-based filtering.");
   }
+
+  // Subscribe to follower's robot_description once to extract joint limits for TELEOP clamping
+  bool follower_urdf_loaded = false;
+  auto urdf_sub = get_node()->create_subscription<std_msgs::msg::String>(
+    params_.follower_robot_description_topic,
+    rclcpp::QoS(1).transient_local().reliable(),
+    [this, &follower_urdf_loaded](std_msgs::msg::String::SharedPtr msg) {
+      if (follower_urdf_loaded) {
+        return;
+      }
+      urdf::Model follower_model;
+      if (!follower_model.initString(msg->data)) {
+        RCLCPP_ERROR(get_node()->get_logger(),
+          "Failed to parse follower robot_description");
+        return;
+      }
+      for (const auto & group_name : trajectory_groups_) {
+        const auto & joints = group_joint_names_[group_name];
+        std::vector<double> lowers, uppers;
+        for (const auto & jn : joints) {
+          auto j = follower_model.getJoint(jn);
+          if (j && j->limits) {
+            lowers.push_back(j->limits->lower);
+            uppers.push_back(j->limits->upper);
+          } else {
+            lowers.push_back(-std::numeric_limits<double>::infinity());
+            uppers.push_back(std::numeric_limits<double>::infinity());
+            RCLCPP_WARN(get_node()->get_logger(),
+              "[%s] No limit for joint '%s' in follower URDF",
+              group_name.c_str(), jn.c_str());
+          }
+        }
+        group_lower_limits_[group_name] = lowers;
+        group_upper_limits_[group_name] = uppers;
+        RCLCPP_INFO(get_node()->get_logger(),
+          "[%s] Loaded follower joint limits (%zu joints)",
+          group_name.c_str(), lowers.size());
+      }
+      follower_urdf_loaded = true;
+    });
+
+  RCLCPP_INFO(get_node()->get_logger(),
+    "Waiting for follower robot_description on '%s'...",
+    params_.follower_robot_description_topic.c_str());
+  while (rclcpp::ok() && !follower_urdf_loaded) {
+    RCLCPP_WARN_THROTTLE(
+      get_node()->get_logger(), *get_node()->get_clock(), 2000,
+      "Still waiting for follower robot_description...");
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  }
+  if (!rclcpp::ok()) {
+    return CallbackReturn::ERROR;
+  }
+  // urdf_sub goes out of scope here, effectively unsubscribing
 
   return CallbackReturn::SUCCESS;
 }
@@ -215,8 +399,31 @@ controller_interface::CallbackReturn JointTrajectoryCommandBroadcaster::on_activ
       group_name.c_str(), num_joints, group_joint_offsets_[group_name].size());
   }
 
-  // No need to init JointState or DynamicJointState messages, only JointTrajectory
-  // will be published. We'll construct it on-the-fly in update()
+  // Pre-allocate joint state message size for each group (real-time safety)
+  // Must be done after init_joint_data() so group_joint_names_ is populated
+  for (const auto & group_name : trajectory_groups_) {
+    const auto & group_joints = group_joint_names_[group_name];
+
+    auto it = realtime_joint_state_stamped_publishers_.find(group_name);
+    if (it != realtime_joint_state_stamped_publishers_.end() && it->second) {
+      auto & msg = it->second->msg_;
+      const size_t num_joints = group_joints.size();
+      msg.name.resize(num_joints);
+      msg.position.resize(num_joints, std::numeric_limits<double>::quiet_NaN());
+      msg.velocity.resize(num_joints, std::numeric_limits<double>::quiet_NaN());
+      msg.effort.resize(num_joints, std::numeric_limits<double>::quiet_NaN());
+
+      // Set joint names once (done in on_activate, not in update loop)
+      for (size_t i = 0; i < num_joints; ++i) {
+        msg.name[i] = group_joints[i];
+      }
+
+      RCLCPP_INFO(
+        get_node()->get_logger(),
+        "Pre-allocated joint state message for group '%s' with %zu joints",
+        group_name.c_str(), num_joints);
+    }
+  }
 
   return CallbackReturn::SUCCESS;
 }
@@ -231,6 +438,10 @@ controller_interface::CallbackReturn JointTrajectoryCommandBroadcaster::on_deact
   group_joint_offsets_.clear();
   group_topic_names_.clear();
   group_reverse_joints_.clear();
+  group_lower_limits_.clear();
+  group_upper_limits_.clear();
+  group_last_target_.clear();
+  group_runtime_.clear();
 
   return CallbackReturn::SUCCESS;
 }
@@ -296,149 +507,6 @@ double get_value(
   }
 }
 
-void JointTrajectoryCommandBroadcaster::joint_states_callback(
-  const sensor_msgs::msg::JointState::SharedPtr msg)
-{
-  // Update follower joint positions
-  for (size_t i = 0; i < msg->name.size(); ++i) {
-    if (i < msg->position.size()) {
-      follower_joint_positions_[msg->name[i]] = msg->position[i];
-    }
-  }
-
-  // Debug logging (only log occasionally to avoid spam)
-  static int callback_count = 0;
-  if (++callback_count % 100 == 0) {
-    RCLCPP_DEBUG(get_node()->get_logger(),
-      "Received follower joint states for %zu joints", msg->name.size());
-  }
-}
-
-double JointTrajectoryCommandBroadcaster::calculate_mean_error() const
-{
-  // Check if we have received any follower joint states
-  if (follower_joint_positions_.empty()) {
-    return std::numeric_limits<double>::max();  // Return max error if no follower data
-  }
-
-  double total_error = 0.0;
-  int valid_joints = 0;
-
-  // Calculate mean error across all joints in all groups
-  for (const auto & group_pair : group_joint_names_) {
-    const auto & group_name = group_pair.first;
-    const auto & group_joints = group_pair.second;
-    // Safely get group offsets and reverse joints
-    std::vector<double> group_offsets;
-    std::vector<std::string> group_reverse_joints;
-
-    auto offsets_it = group_joint_offsets_.find(group_name);
-    if (offsets_it != group_joint_offsets_.end()) {
-      group_offsets = offsets_it->second;
-    }
-
-    auto reverse_it = group_reverse_joints_.find(group_name);
-    if (reverse_it != group_reverse_joints_.end()) {
-      group_reverse_joints = reverse_it->second;
-    }
-
-    for (size_t i = 0; i < group_joints.size(); ++i) {
-      const auto & joint_name = group_joints[i];
-      auto follower_it = follower_joint_positions_.find(joint_name);
-      if (follower_it == follower_joint_positions_.end()) {
-        continue;  // Skip joints not available in follower
-      }
-
-      double leader_pos = get_value(name_if_value_mapping_, joint_name, HW_IF_POSITION);
-      if (std::isnan(leader_pos)) {
-        continue;  // Skip joints without valid leader position
-      }
-
-      // Apply reverse and offset to leader position for comparison
-      if (std::find(group_reverse_joints.begin(), group_reverse_joints.end(), joint_name) !=
-        group_reverse_joints.end())
-      {
-        leader_pos = -leader_pos;
-      }
-
-      // Apply group offset
-      if (i < group_offsets.size()) {
-        leader_pos += group_offsets[i];
-      }
-
-      total_error += std::abs(leader_pos - follower_it->second);
-      valid_joints++;
-    }
-  }
-
-  return valid_joints > 0 ? total_error / valid_joints : std::numeric_limits<double>::max();
-}
-
-bool JointTrajectoryCommandBroadcaster::check_trigger_active() const
-{
-  // Check if gripper trigger joints are above threshold
-  double gripper_r_pos = get_value(name_if_value_mapping_, "gripper_r_joint1", HW_IF_POSITION);
-  double gripper_l_pos = get_value(name_if_value_mapping_, "gripper_l_joint1", HW_IF_POSITION);
-
-  // Return true if both grippers are above threshold
-  return (!std::isnan(gripper_r_pos) &&
-         gripper_r_pos * params_.trigger_sign >=
-         params_.trigger_threshold * params_.trigger_sign) &&
-         (!std::isnan(gripper_l_pos) &&
-         gripper_l_pos * params_.trigger_sign >= params_.trigger_threshold * params_.trigger_sign);
-}
-
-void JointTrajectoryCommandBroadcaster::update_trigger_state(const rclcpp::Time & current_time)
-{
-  bool current_trigger_active = check_trigger_active();
-
-  if (current_trigger_active && !trigger_counting_) {
-    // Start trigger counting (only if mode hasn't changed in this trigger session)
-    if (!mode_changed_in_this_trigger_) {
-      trigger_counting_ = true;
-      trigger_start_time_ = current_time;
-      RCLCPP_INFO(get_node()->get_logger(), "Trigger activated - counting started");
-    }
-  } else if (!current_trigger_active) {
-    // Trigger released - reset all states
-    if (trigger_counting_) {
-      trigger_counting_ = false;
-      RCLCPP_INFO(get_node()->get_logger(), "Trigger released - counting stopped");
-    }
-    // Reset for next trigger session when trigger is completely released
-    mode_changed_in_this_trigger_ = false;
-  }
-
-  // Check if trigger has been held for specified duration and mode hasn't changed in this session
-  if (trigger_counting_ && !mode_changed_in_this_trigger_ &&
-    (current_time - trigger_start_time_) >=
-    rclcpp::Duration::from_seconds(params_.trigger_duration))
-  {
-    // Toggle auto mode state
-    if (auto_mode_ == AutoMode::STOPPED) {
-      auto_mode_ = AutoMode::ACTIVE;
-      // Reset sync state when starting auto mode
-      joints_synced_ = false;
-      first_publish_ = true;
-      RCLCPP_INFO(get_node()->get_logger(),
-          "Auto mode ACTIVATED - follower will slowly follow leader");
-    } else {
-      auto_mode_ = AutoMode::STOPPED;
-      RCLCPP_INFO(get_node()->get_logger(), "Auto mode STOPPED - follower paused");
-    }
-
-    // Mark that mode has changed in this trigger session
-    mode_changed_in_this_trigger_ = true;
-    trigger_counting_ = false;  // Stop counting
-  }
-}
-
-bool JointTrajectoryCommandBroadcaster::check_joints_synced() const
-{
-  double mean_error = calculate_mean_error();
-  return mean_error <= params_.sync_threshold;
-}
-
 controller_interface::return_type JointTrajectoryCommandBroadcaster::update(
   const rclcpp::Time & time, const rclcpp::Duration & /*period*/)
 {
@@ -454,36 +522,10 @@ controller_interface::return_type JointTrajectoryCommandBroadcaster::update(
     }
   }
 
-  // Update trigger state for auto mode control
-  update_trigger_state(time);
-
-  // Skip publishing if auto mode is STOPPED
-  if (auto_mode_ == AutoMode::STOPPED) {
-    return controller_interface::return_type::OK;
-  }
-
-  // Calculate mean error and check if joints are synced
-  double mean_error = calculate_mean_error();
-  bool current_synced = check_joints_synced();
-
-  // Update sync status and handle first publish
-  if (first_publish_) {
-    joints_synced_ = false;
-    first_publish_ = false;
-    RCLCPP_INFO(get_node()->get_logger(),
-        "First publish - using adaptive time_from_start based on error");
-  } else {
-    // Once synced, stay synced permanently
-    if (!joints_synced_ && current_synced) {
-      joints_synced_ = true;
-      RCLCPP_INFO(get_node()->get_logger(),
-          "Joints synced for the first time - switching to immediate time_from_start permanently");
-    }
-  }
-
   // Publish JointTrajectory messages for each group with current positions
   for (const auto & group_name : trajectory_groups_) {
     const auto & group_joints = group_joint_names_[group_name];
+
     // Safely get group offsets and reverse joints
     std::vector<double> group_offsets;
     std::vector<std::string> group_reverse_joints;
@@ -498,68 +540,250 @@ controller_interface::return_type JointTrajectoryCommandBroadcaster::update(
       group_reverse_joints = reverse_it->second;
     }
 
-    if (group_joints.empty()) {
-      continue;  // Skip empty groups
+    const size_t num_joints = group_joints.size();
+    auto & last_target = group_last_target_[group_name];
+    auto & rt = group_runtime_[group_name];
+
+    // Update last_target based on mode
+    switch (rt.mode) {
+      case Mode::IDLE: {
+        // No update: hold last_target
+        break;
+      }
+
+      case Mode::TELEOP: {
+        // Leader tracking, with optional blend on entry
+        double blend_alpha = 1.0;
+        if (rt.blend.active) {
+          double elapsed = (get_node()->now() - rt.blend.start_time).seconds();
+          double t = std::clamp(elapsed / params_.leader_blend_duration, 0.0, 1.0);
+          blend_alpha = 3.0 * t * t - 2.0 * t * t * t;  // cubic smoothstep
+          if (t >= 1.0) {
+            rt.blend.active = false;
+          }
+        }
+
+        const auto & lowers = group_lower_limits_[group_name];
+        const auto & uppers = group_upper_limits_[group_name];
+        const bool clamp_enabled =
+          lowers.size() == num_joints && uppers.size() == num_joints;
+
+        last_target.resize(num_joints);
+        for (size_t i = 0; i < num_joints; ++i) {
+          double leader_val =
+            get_value(name_if_value_mapping_, group_joints[i], HW_IF_POSITION);
+          if (std::find(group_reverse_joints.begin(), group_reverse_joints.end(),
+              group_joints[i]) != group_reverse_joints.end())
+          {
+            leader_val = -leader_val;
+          }
+          if (i < group_offsets.size()) {
+            leader_val += group_offsets[i];
+          }
+
+          if (rt.blend.active && i < rt.blend.start_pos.size()) {
+            leader_val = (1.0 - blend_alpha) * rt.blend.start_pos[i] +
+              blend_alpha * leader_val;
+          }
+
+          // Clamp to follower joint limits
+          if (clamp_enabled) {
+            leader_val = std::clamp(leader_val, lowers[i], uppers[i]);
+          }
+          last_target[i] = leader_val;
+        }
+        break;
+      }
+
+      case Mode::SAVE_POSE: {
+        // Cubic interp to target; hold at target after completion
+        if (rt.interp.active) {
+          double elapsed = (get_node()->now() - rt.interp.start_time).seconds();
+          double t = std::clamp(elapsed / rt.interp.duration_sec, 0.0, 1.0);
+          double s = 3.0 * t * t - 2.0 * t * t * t;
+          if (t >= 1.0) {
+            rt.interp.active = false;
+          }
+
+          last_target.resize(num_joints);
+          for (size_t i = 0; i < num_joints; ++i) {
+            if (i < rt.interp.start_pos.size() && i < rt.interp.target_pos.size()) {
+              last_target[i] = rt.interp.start_pos[i] +
+                s * (rt.interp.target_pos[i] - rt.interp.start_pos[i]);
+            }
+          }
+        }
+        // else: hold last_target (which should equal target after completion)
+        break;
+      }
     }
 
+    // last_target is valid only after first enable/interp
+    bool valid = last_target.size() == num_joints &&
+                 !std::isnan(last_target[0]);
+
+    // Publish trajectory (always when last_target valid)
     auto & realtime_publisher = realtime_joint_trajectory_publishers_[group_name];
-    if (realtime_publisher) {
+    if (valid && realtime_publisher) {
       trajectory_msgs::msg::JointTrajectory traj_msg;
       traj_msg.header.stamp = rclcpp::Time(0, 0);
       traj_msg.joint_names = group_joints;
-
-      const size_t num_joints = group_joints.size();
-      traj_msg.points.clear();
       traj_msg.points.resize(1);
-      traj_msg.points[0].positions.resize(num_joints, kUninitializedValue);
-
-      for (size_t i = 0; i < num_joints; ++i) {
-        double pos_value =
-          get_value(name_if_value_mapping_, group_joints[i], HW_IF_POSITION);
-
-        // Check if the current joint is in the reverse_joints parameter
-        if (
-          std::find(
-            group_reverse_joints.begin(),
-            group_reverse_joints.end(),
-            group_joints[i]) != group_reverse_joints.end())
-        {
-          pos_value = -pos_value;
-        }
-
-        // Apply offset
-        if (i < group_offsets.size()) {
-          pos_value += group_offsets[i];
-        }
-
-        traj_msg.points[0].positions[i] = pos_value;
-      }
-
-      // Set time_from_start based on sync status and mean error
-      if (joints_synced_) {
-        traj_msg.points[0].time_from_start = rclcpp::Duration(0, 0);  // immediate when synced
-      } else {
-        // Adaptive timing based on mean error using parameters
-        if(mean_error < params_.min_error) {
-          mean_error = 0;
-        }
-
-        double error_ratio = std::min(mean_error / params_.max_error, 1.0);
-        // Corrected logic: small error -> small delay, large error -> large delay
-        double adaptive_delay = params_.min_delay + (params_.max_delay - params_.min_delay) *
-          error_ratio;
-
-
-        // Convert to nanoseconds
-        int32_t delay_ns = static_cast<int32_t>(adaptive_delay * 1e9);
-        traj_msg.points[0].time_from_start = rclcpp::Duration(0, delay_ns);
-      }
-
+      traj_msg.points[0].positions = last_target;
+      traj_msg.points[0].time_from_start = rclcpp::Duration(0, 0);
       realtime_publisher->try_publish(traj_msg);
+    }
+
+    // Publish joint state for this group with timestamp from update() function
+    // Real-time safe: message size pre-allocated in on_activate(), only copy values here
+    // Apply same transformations (reverse, offsets) as joint_trajectory
+    auto joint_state_pub_it = realtime_joint_state_stamped_publishers_.find(group_name);
+      if (joint_state_pub_it != realtime_joint_state_stamped_publishers_.end() &&
+        joint_state_pub_it->second)
+      {
+        auto & realtime_joint_state_publisher = joint_state_pub_it->second;
+        if (realtime_joint_state_publisher->trylock()) {
+        auto & msg = realtime_joint_state_publisher->msg_;
+
+        // Set timestamp from update() function argument (actual sensor read time)
+        msg.header.stamp = time;
+        msg.header.frame_id = "";
+
+        // Copy values from name_if_value_mapping_ to pre-allocated message
+        // Apply same reverse and offset transformations as joint_trajectory
+        // No string operations, no dynamic allocation - only value copying
+        for (size_t i = 0; i < group_joints.size() && i < msg.name.size(); ++i) {
+          const std::string & joint_name = group_joints[i];
+          double pos_value = (i < last_target.size()) ? last_target[i] :
+            std::numeric_limits<double>::quiet_NaN();
+
+          msg.position[i] = std::isnan(pos_value) ? std::numeric_limits<double>::quiet_NaN() :
+            pos_value;
+
+          // Get velocity if available (no reverse/offset for velocity)
+          if (name_if_value_mapping_.count(joint_name) > 0) {
+            const auto & interfaces = name_if_value_mapping_.at(joint_name);
+            auto vel_it = interfaces.find(HW_IF_VELOCITY);
+            if (vel_it != interfaces.end() && !std::isnan(vel_it->second)) {
+              // Apply reverse sign to velocity if joint is reversed
+              double vel_value = vel_it->second;
+              if (
+                std::find(
+                  group_reverse_joints.begin(),
+                  group_reverse_joints.end(),
+                  joint_name) != group_reverse_joints.end())
+              {
+                vel_value = -vel_value;
+              }
+              msg.velocity[i] = vel_value;
+            } else {
+              msg.velocity[i] = std::numeric_limits<double>::quiet_NaN();
+            }
+
+            // Get effort if available (no reverse/offset for effort)
+            auto eff_it = interfaces.find(HW_IF_EFFORT);
+            if (eff_it != interfaces.end() && !std::isnan(eff_it->second)) {
+              msg.effort[i] = eff_it->second;
+            } else {
+              msg.effort[i] = std::numeric_limits<double>::quiet_NaN();
+            }
+          } else {
+            msg.velocity[i] = std::numeric_limits<double>::quiet_NaN();
+            msg.effort[i] = std::numeric_limits<double>::quiet_NaN();
+          }
+        }
+
+        realtime_joint_state_publisher->unlockAndPublish();
+      }
     }
   }
 
   return controller_interface::return_type::OK;
+}
+
+void JointTrajectoryCommandBroadcaster::handle_enable_msg(
+  const std::string & group_name, uint8_t data)
+{
+  auto & rt = group_runtime_[group_name];
+
+  switch (data) {
+    case 0: // stop
+      rt.mode = Mode::IDLE;
+      return;
+
+    case 1: // teleop
+      if (rt.mode != Mode::TELEOP) {
+        start_teleop_blend(group_name);
+      }
+      rt.mode = Mode::TELEOP;
+      return;
+
+    case 2:  // toggle
+      if (rt.mode == Mode::TELEOP) {
+        rt.mode = Mode::IDLE;
+      } else {
+        start_teleop_blend(group_name);
+        rt.mode = Mode::TELEOP;
+      }
+      return;
+
+    default: {  // 3, 4, ... : save pose N
+      auto gp_it = group_save_poses_.find(group_name);
+      if (gp_it == group_save_poses_.end()) {
+        return;
+      }
+      auto pose_it = gp_it->second.find(data);
+      if (pose_it == gp_it->second.end()) {
+        RCLCPP_WARN(get_node()->get_logger(),
+          "[%s] No save pose defined for id=%u", group_name.c_str(), data);
+        return;
+      }
+      start_save_pose_interp(group_name, pose_it->second);
+      rt.mode = Mode::SAVE_POSE;
+      RCLCPP_INFO(get_node()->get_logger(),
+        "[%s] Start interpolation to save pose %u", group_name.c_str(), data);
+      return;
+    }
+  }
+}
+
+void JointTrajectoryCommandBroadcaster::start_teleop_blend(
+  const std::string & group_name)
+{
+  auto last_it = group_last_target_.find(group_name);
+  if (last_it == group_last_target_.end() || last_it->second.empty()) {
+    return;
+  }
+  auto & bs = group_runtime_[group_name].blend;
+  bs.start_pos = last_it->second;   // snapshot
+  bs.start_time = get_node()->now();
+  bs.active = true;
+  RCLCPP_INFO(get_node()->get_logger(),
+    "[%s] Start teleop blend (%.1fs)",
+    group_name.c_str(), params_.leader_blend_duration);
+}
+
+void JointTrajectoryCommandBroadcaster::start_save_pose_interp(
+  const std::string & group_name, const std::vector<double> & target)
+{
+  auto last_it = group_last_target_.find(group_name);
+  if (last_it == group_last_target_.end() || last_it->second.empty()) {
+    RCLCPP_WARN(get_node()->get_logger(),
+      "[%s] last_target not initialized; skip interpolation", group_name.c_str());
+    return;
+  }
+  if (target.size() != last_it->second.size()) {
+    RCLCPP_WARN(get_node()->get_logger(),
+      "[%s] save pose size (%zu) mismatch joints (%zu)",
+      group_name.c_str(), target.size(), last_it->second.size());
+    return;
+  }
+  auto & st = group_runtime_[group_name].interp;
+  st.start_time = get_node()->now();
+  st.start_pos = last_it->second;
+  st.target_pos = target;
+  st.duration_sec = params_.save_pose_duration;
+  st.active = true;
 }
 
 }  // namespace joint_trajectory_command_broadcaster

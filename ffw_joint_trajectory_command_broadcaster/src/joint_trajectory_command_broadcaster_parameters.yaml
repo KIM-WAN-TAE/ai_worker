@@ -18,7 +18,8 @@ joint_trajectory_command_broadcaster:
   }
   sync_threshold: {
     type: double,
-    default_value: 0.01,
+    # default_value: 0.01,
+    default_value: 0.1,
     description: "Threshold value (in radians) to determine if follower joints are synced with leader joints."
   }
   max_error: {
@@ -56,6 +57,11 @@ joint_trajectory_command_broadcaster:
     default_value: [],
     description: "Reverse joints for left arm group."
   }
+  left_joint_states_stamped_topic: {
+    type: string,
+    default_value: "",
+    description: "Topic to publish stamped joint states for the left group. If empty, derive from the group name."
+  }
   right_joints: {
     type: string_array,
     default_value: [],
@@ -71,18 +77,49 @@ joint_trajectory_command_broadcaster:
     default_value: [],
     description: "Reverse joints for right arm group."
   }
-  trigger_threshold: {
-    type: double,
-    default_value: -0.5,
-    description: "Threshold value for gripper trigger joints to activate auto mode. Both gripper triggers must exceed this value."
+  right_joint_states_stamped_topic: {
+    type: string,
+    default_value: "",
+    description: "Topic to publish stamped joint states for the right group. If empty, derive from the group name."
   }
-  trigger_duration: {
-    type: double,
-    default_value: 2.0,
-    description: "Duration (in seconds) that triggers must be held above threshold to toggle auto mode."
+  left_enabled_init: {
+    type: bool,
+    default_value: false,
+    description: "Initial enable state for left arm group."
   }
-  trigger_sign: {
+  right_enabled_init: {
+    type: bool,
+    default_value: false,
+    description: "Initial enable state for right arm group."
+  }
+  left_follower_joint_states_topic: {
+    type: string,
+    default_value: "/robot/arm_left_follower/joint_states",
+    description: "Follower joint states topic for left arm (used to init last_target once at startup)."
+  }
+  right_follower_joint_states_topic: {
+    type: string,
+    default_value: "/robot/arm_right_follower/joint_states",
+    description: "Follower joint states topic for right arm (used to init last_target once at startup)."
+  }
+  follower_robot_description_topic: {
+    type: string,
+    default_value: "/robot_description",
+    description: "Topic name providing follower's robot_description. Used to fetch joint limits once at startup for TELEOP clamping."
+  }
+  save_pose_duration: {
     type: double,
-    default_value: -1.0,
-    description: "Sign of the trigger joints. 1.0 for positive sign, -1.0 for negative sign."
+    default_value: 3.0,
+    description: "Cubic interpolation duration (seconds) when going to a save pose."
+  }
+  leader_blend_duration: {
+    type: double,
+    # default_value: 1.2,
+    default_value: 2.5,
+    description: "Seconds to blend from last_target to leader value when entering state=1."
+  }
+  save_pose_ids: {
+    type: int_array,
+    default_value: [],
+    description: "List of save pose IDs to pre-declare (e.g., [3,4,5]). Actual poses loaded from left_save_pose_<id> / right_save_pose_<id>."
   }

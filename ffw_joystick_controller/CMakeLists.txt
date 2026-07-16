@@ -17,7 +17,10 @@ set(THIS_PACKAGE_INCLUDE_DEPENDS
   pluginlib
   rclcpp
   rclcpp_lifecycle
+  sensor_msgs
   std_msgs
+  trajectory_msgs
+  geometry_msgs
 )
 
 ################################################################################
@@ -44,7 +47,10 @@ target_include_directories(joystick_controller PUBLIC
   $<INSTALL_INTERFACE:include/joystick_controller>
 )
 target_link_libraries(joystick_controller PUBLIC
+  ${geometry_msgs_TARGETS}
+  ${sensor_msgs_TARGETS}
   ${std_msgs_TARGETS}
+  ${trajectory_msgs_TARGETS}
   controller_interface::controller_interface
   hardware_interface::mock_components
   joystick_controller_parameters

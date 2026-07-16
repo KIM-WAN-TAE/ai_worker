@@ -28,6 +28,7 @@
   <ffw_joint_trajectory_command_broadcaster/joint_trajectory_command_broadcaster_parameters.hpp>
 #include "realtime_tools/realtime_publisher.hpp"
 #include "sensor_msgs/msg/joint_state.hpp"
+#include "std_msgs/msg/u_int8.hpp"
 #include "urdf/model.h"
 #include "trajectory_msgs/msg/joint_trajectory.hpp"
 #include "rclcpp/subscription.hpp"
@@ -91,11 +92,9 @@ public:
 
 protected:
   bool init_joint_data();
-  void joint_states_callback(const sensor_msgs::msg::JointState::SharedPtr msg);
-  bool check_joints_synced() const;
-  double calculate_mean_error() const;
-  void update_trigger_state(const rclcpp::Time & current_time);
-  bool check_trigger_active() const;
+  void handle_enable_msg(const std::string & group_name, uint8_t data);
+  void start_save_pose_interp(const std::string & group_name, const std::vector<double> & target);
+  void start_teleop_blend(const std::string & group_name);
 
 protected:
   // Optional parameters
@@ -116,6 +115,14 @@ protected:
   // RT messages for trajectory (one per group)
   std::unordered_map<std::string, trajectory_msgs::msg::JointTrajectory> group_traj_msgs_;
 
+  // Joint state publishers with timestamp from update() function (one per group)
+  std::unordered_map<std::string,
+    std::shared_ptr<rclcpp::Publisher<sensor_msgs::msg::JointState>>>
+  joint_state_stamped_publishers_;
+  std::unordered_map<std::string,
+    std::shared_ptr<realtime_tools::RealtimePublisher<sensor_msgs::msg::JointState>>>
+  realtime_joint_state_stamped_publishers_;
+
   // Joint groups configuration
   std::unordered_map<std::string, std::vector<std::string>> group_joint_names_;
   std::unordered_map<std::string, std::vector<double>> group_joint_offsets_;
@@ -128,23 +135,54 @@ protected:
   urdf::Model model_;
   bool is_model_loaded_ = false;
 
-  // Follower joint states tracking
-  std::shared_ptr<rclcpp::Subscription<sensor_msgs::msg::JointState>> joint_states_subscriber_;
-  std::unordered_map<std::string, double> follower_joint_positions_;
-  bool joints_synced_ = false;
-  bool first_publish_ = true;
+  // Enable subscribers
+  rclcpp::Subscription<std_msgs::msg::UInt8>::SharedPtr left_enable_sub_;
+  rclcpp::Subscription<std_msgs::msg::UInt8>::SharedPtr right_enable_sub_;
 
-  // Trigger-based auto mode control
-  enum class AutoMode
-  {
-    STOPPED,     // pause mode
-    ACTIVE       // follow mode (slowly following)
+  // Last published target per group (used as blend/interp start)
+  std::unordered_map<std::string, std::vector<double>> group_last_target_;
+
+  // One-shot follower subscriptions to init last_target at startup
+  rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr left_follower_js_sub_;
+  rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr right_follower_js_sub_;
+  std::unordered_map<std::string, bool> group_last_target_initialized_;
+
+  // Save poses per group: map<pose_id, positions>
+  std::unordered_map<std::string, std::unordered_map<uint8_t, std::vector<double>>>
+    group_save_poses_;
+
+  // Follower joint limits per group (parallel to group_joint_names_)
+  std::unordered_map<std::string, std::vector<double>> group_lower_limits_;
+  std::unordered_map<std::string, std::vector<double>> group_upper_limits_;
+
+  // Operating mode per group
+  enum class Mode : uint8_t {
+    IDLE,       // no update to last_target (hold)
+    TELEOP,     // teleoperation: track leader (with blend on entry)
+    SAVE_POSE,  // cubic interpolate to save pose, then hold
   };
 
-  AutoMode auto_mode_ = AutoMode::STOPPED;
-  rclcpp::Time trigger_start_time_{0, 0, RCL_ROS_TIME};  // Initialize to zero time
-  bool trigger_counting_ = false;
-  bool mode_changed_in_this_trigger_ = false;
+  struct BlendState {
+    rclcpp::Time start_time;
+    std::vector<double> start_pos;
+    bool active = false;
+  };
+
+  struct InterpState {
+    rclcpp::Time start_time;
+    std::vector<double> start_pos;
+    std::vector<double> target_pos;
+    double duration_sec = 0.0;
+    bool active = false;
+  };
+
+  struct GroupRuntime {
+    Mode mode = Mode::IDLE;
+    BlendState blend;       // used when entering TELEOP
+    InterpState interp;     // used for SAVE_POSE
+  };
+  std::unordered_map<std::string, GroupRuntime> group_runtime_;
+
 };
 
 }  // namespace joint_trajectory_command_broadcaster

@@ -57,12 +57,17 @@
         - 0.1
       left_joint_states_stamped_topic: "/robot/arm_left_leader/joint_states"
       right_joint_states_stamped_topic: "/robot/arm_right_leader/joint_states"
+      left_follower_joint_states_topic: "/joint_states"
+      right_follower_joint_states_topic: "/joint_states"
       trigger_threshold: -0.5
       save_pose_duration: 2.0
       save_pose_ids: [3, 4]
       # s r r s r s r
-      left_save_pose_3: [0.4310126487211491, 0.3037162117764516, 0.15187608222558382, -2.4574492064177025, -0.26688868864229087, 0.6856534595101655, -0.9479904508402741, 0.0]
-      right_save_pose_3: [0.4310126487211491, -0.3037162117764516, -0.15187608222558382, -2.4574492064177025, 0.26688868864229087, 0.6856534595101655, 0.9479904508402741, 0.0]
+      #left_save_pose_3: [0.4310126487211491, 0.3037162117764516, 0.15187608222558382, -2.4574492064177025, -0.26688868864229087, 0.6856534595101655, -0.9479904508402741, 0.0]
+      #right_save_pose_3: [0.4310126487211491, -0.3037162117764516, -0.15187608222558382, -2.4574492064177025, 0.26688868864229087, 0.6856534595101655, 0.9479904508402741, 0.0]
+      #left_save_pose_3: [0.2127, 0.52, 0.0685, -1.792, 0.1741, 0.0, -1.3972, 0.0]
+      left_save_pose_3: [0.224, 0.0, 0.195, -1.963, 0.172, 0.287, 1.049, 0.005]
+      right_save_pose_3: [0.2127, -0.52, -0.0685, -1.792, -0.1741, 0.0, 1.3972, 0.0]
       left_save_pose_4: [0.4310126487211491, 0.3037162117764516, 0.15187608222558382, -2.4574492064177025, -0.26688868864229087, 0.6856534595101655, -0.9479904508402741, 1.0]
       right_save_pose_4: [0.4310126487211491, -0.3037162117764516, -0.15187608222558382, -2.4574492064177025, 0.26688868864229087, 0.6856534595101655, 0.9479904508402741, 1.0]
 
@@ -112,5 +117,5 @@
       sensorxel_r_joy_joint_states_stamped_topic: "/robot/lift_leader/joint_states"
       sensorxel_l_joy_jog_scale: 0.06
       sensorxel_r_joy_jog_scale: 0.01
-      deadzone: 1.0
-      enable_joystick_update: true
+      deadzone: 0.05
+      enable_joystick_update: false

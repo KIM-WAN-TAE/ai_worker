@@ -10,8 +10,11 @@
         - arm_l_joint6
         - arm_l_joint7
         - gripper_l_joint1
-      step_names: [home]
-      home: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+      #step_names: [home]
+      #home: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+      step_names: [step0, step1]
+      step0: [1.57, 0.0, 0.0, -2.8, 0.0, 0.0, 0.0, 0.0]
+      step1: [-1.058, 0.7577, -1.072, -1.403, 2.103, 0.862, 0.715, 0.025]
       duration: 5.0
       position_tolerance: 0.1
       velocity_tolerance: 0.01
@@ -30,8 +33,11 @@
         - arm_r_joint6
         - arm_r_joint7
         - gripper_r_joint1
-      step_names: [home]
-      home: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+      #step_names: [home]
+      #home: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+      step_names: [step0, step1]
+      step0: [1.57, 0.0, 0.0, -2.8, 0.0, 0.0, 0.0, 0.0]
+      step1: [-0.352, -0.526, 0.1789, -1.333, -0.140, 0.0914, 1.8201, 0.0]
       duration: 5.0
       position_tolerance: 0.1
       velocity_tolerance: 0.01
@@ -45,7 +51,7 @@
         - head_joint1
         - head_joint2
       step_names: [home]
-      home: [0.0, 0.0]
+      home: [0.7, 0.0]
       duration: 5.0
       position_tolerance: 0.1
       velocity_tolerance: 0.01
@@ -57,8 +63,11 @@
     ros__parameters:
       joint_names:
         - lift_joint
-      step_names: [home]
-      home: [0.0]
+      #step_names: [home]
+      #home: [0.0]
+      step_names: [step0, step1]
+      step0: [0.0]
+      step1: [-0.15]
       duration: 10.0
       position_tolerance: 0.1
       velocity_tolerance: 0.01

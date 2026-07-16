@@ -27,6 +27,10 @@ setup(
          glob('config/ffw_bg2_rev3_follower/*')),
         (os.path.join('share', package_name, 'config/ffw_bg2_rev4_follower'),
          glob('config/ffw_bg2_rev4_follower/*')),
+        (os.path.join('share', package_name, 'config/ffw_a2'),
+         glob('config/ffw_a2/*')),
+        (os.path.join('share', package_name, 'config/ffw_a3'),
+         glob('config/ffw_a3/*')),
         (os.path.join('share', package_name, 'config/ffw_bh5_rev1_follower'),
          glob('config/ffw_bh5_rev1_follower/*')),
         (os.path.join('share', package_name, 'config/ffw_f1_follower'),
@@ -62,6 +66,7 @@ setup(
         'console_scripts': [
             'joint_trajectory_executor = ffw_bringup.joint_trajectory_executor:main',
             'head_eef_tracker = ffw_bringup.head_eef_tracker:main',
+            'foot_switch_node = ffw_bringup.foot_switch:main',
         ],
     },
 )

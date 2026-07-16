@@ -12,14 +12,18 @@ endif()
 
 set(THIS_PACKAGE_INCLUDE_DEPENDS
   builtin_interfaces
+  control_msgs
   controller_interface
   generate_parameter_library
   pluginlib
+  rclcpp
   rclcpp_lifecycle
   rcutils
   realtime_tools
+  sensor_msgs
   urdf
   trajectory_msgs
+  std_msgs
 )
 
 ################################################################################
@@ -45,6 +49,9 @@ target_include_directories(joint_trajectory_command_broadcaster PUBLIC
 )
 target_link_libraries(joint_trajectory_command_broadcaster PUBLIC
   ${builtin_interfaces_TARGETS}
+  ${control_msgs_TARGETS}
+  ${sensor_msgs_TARGETS}
+  ${std_msgs_TARGETS}
   ${trajectory_msgs_TARGETS}
   controller_interface::controller_interface
   joint_trajectory_command_broadcaster_parameters
@@ -56,6 +63,17 @@ target_link_libraries(joint_trajectory_command_broadcaster PUBLIC
 # which is appropriate when building the dll but not consuming it.
 target_compile_definitions(joint_trajectory_command_broadcaster PRIVATE "JOINT_TRAJECTORY_COMMAND_BROADCASTER_BUILDING_DLL")
 pluginlib_export_plugin_description_file(controller_interface joint_trajectory_command_plugin.xml)
+
+################################################################################
+# gripper_trigger standalone node
+################################################################################
+add_executable(gripper_trigger src/gripper_trigger.cpp)
+target_compile_features(gripper_trigger PUBLIC cxx_std_17)
+ament_target_dependencies(gripper_trigger
+  rclcpp
+  sensor_msgs
+  std_msgs
+)
 
 ################################################################################
 # Install
@@ -73,6 +91,11 @@ install(
   RUNTIME DESTINATION bin
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
+)
+
+install(
+  TARGETS gripper_trigger
+  DESTINATION lib/${PROJECT_NAME}
 )
 
 ################################################################################
