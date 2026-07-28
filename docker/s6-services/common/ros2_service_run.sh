@@ -39,6 +39,31 @@ echo "${PGID}" > /run/${SERVICE_NAME}.pgid || true
 source /opt/ros/${ROS_DISTRO}/setup.bash
 source ${COLCON_WS}/install/setup.bash
 
+# Physical robot bringup must never overlap a running policy container.
+# Policy containers expose one of these services as soon as they start, even
+# while the model session itself is STOPPED.  Fail closed if discovery cannot
+# complete, because an unchecked bringup can race an existing command
+# publisher and move hardware unexpectedly.
+if [ "${SERVICE_NAME}" = "ai_worker_bringup" ]; then
+    INFERENCE_SERVICES_FILE=$(mktemp)
+    if ! timeout 8s ros2 service list > "${INFERENCE_SERVICES_FILE}"; then
+        echo "[${SERVICE_NAME}] SAFETY BLOCK: could not verify that inference containers are stopped." >&2
+        rm -f "${INFERENCE_SERVICES_FILE}"
+        exit 64
+    fi
+    ACTIVE_INFERENCE_SERVICES=$(
+        grep -E '^/(lerobot|groot)/inference_command$' "${INFERENCE_SERVICES_FILE}" || true
+    )
+    rm -f "${INFERENCE_SERVICES_FILE}"
+    if [ -n "${ACTIVE_INFERENCE_SERVICES}" ]; then
+        echo "[${SERVICE_NAME}] SAFETY BLOCK: inference service is still active:" >&2
+        echo "${ACTIVE_INFERENCE_SERVICES}" >&2
+        echo "[${SERVICE_NAME}] STOP, UNLOAD, and stop all inference containers before bringup." >&2
+        exit 64
+    fi
+    echo "[${SERVICE_NAME}] Inference-container preflight passed."
+fi
+
 # Determine the command to execute
 # If ROS2_COMMAND is set, use it; otherwise, use the default launch command
 if [ -n "${ROS2_COMMAND}" ]; then
