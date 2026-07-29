@@ -107,7 +107,31 @@ joystick_controller:
   enable_joystick_update: {
     type: bool,
     default_value: true,
-    description: "Enable joystick X/Y motion updates and trajectory publishing while keeping tact-switch features active.",
+    description: "Legacy master switch for joystick X/Y command outputs. Tact-switch features remain active when false.",
+    read_only: true
+  }
+  enable_joint_jog_update: {
+    type: bool,
+    default_value: true,
+    description: "Enable joystick-driven auxiliary joint trajectory commands (for example head/lift jog).",
+    read_only: true
+  }
+  enable_cmd_vel_update: {
+    type: bool,
+    default_value: true,
+    description: "Enable joystick-driven mobile-base Twist commands on /cmd_vel.",
+    read_only: true
+  }
+  require_middle_pedal_for_cmd_vel: {
+    type: bool,
+    default_value: false,
+    description: "Require a fresh pressed middle-pedal heartbeat before publishing non-zero /cmd_vel.",
+    read_only: true
+  }
+  middle_pedal_timeout_sec: {
+    type: double,
+    default_value: 0.5,
+    description: "Maximum age of the middle-pedal heartbeat used by the /cmd_vel gate.",
     read_only: true
   }
   long_press_duration: {

@@ -8,8 +8,6 @@ import time
 
 import rclpy
 from rclpy.node import Node
-from rcl_interfaces.srv import SetParameters
-from rcl_interfaces.msg import Parameter, ParameterValue, ParameterType
 from std_msgs.msg import Bool, UInt8
 
 DEVICE = "/dev/input/by-id/usb-PCsensor_FootSwitch-event-kbd"
@@ -28,6 +26,7 @@ DEBOUNCE_SEC = 0.5
 DEBOUNCE_ENABLED = True
 
 SAVE_POSE_ID = 4
+MIDDLE_PEDAL_HEARTBEAT_SEC = 0.1
 
 
 class FootSwitchReader(Node):
@@ -38,13 +37,7 @@ class FootSwitchReader(Node):
 
         self.last_event_time = {}
 
-        self.already_middle_pub = False
-
-        # Parameter client for joystick_controller deadzone
-        self.deadzone_param_client = self.create_client(
-            SetParameters,
-            '/leader/joystick_controller/set_parameters'
-        )
+        self.middle_pedal_pressed = False
 
         # enable publishers (0=disable, 1=enable, 2=toggle, 3+=save pose N)
         self.left_enable_pub = self.create_publisher(
@@ -54,6 +47,10 @@ class FootSwitchReader(Node):
 
         self.middle_pedal_pub = self.create_publisher(
             Bool, "/leader/foot_switch/middle_pedal", 1)
+        self.middle_pedal_timer = self.create_timer(
+            MIDDLE_PEDAL_HEARTBEAT_SEC,
+            self.publish_middle_pedal_state,
+        )
 
     def open_device(self):
         try:
@@ -100,17 +97,10 @@ class FootSwitchReader(Node):
         self.last_event_time[key] = now
         return True
 
-    def _set_deadzone(self, value: float):
-        req = SetParameters.Request()
-        param = Parameter()
-        param.name = 'deadzone'
-        param.value = ParameterValue(
-            type=ParameterType.PARAMETER_DOUBLE,
-            double_value=value,
-        )
-        req.parameters = [param]
-        self.deadzone_param_client.call_async(req)
-        print(f"deadzone : {value}")
+    def publish_middle_pedal_state(self):
+        msg = Bool()
+        msg.data = self.middle_pedal_pressed
+        self.middle_pedal_pub.publish(msg)
 
     def handle_left(self, event_value: int):
         if event_value == 1:
@@ -121,20 +111,14 @@ class FootSwitchReader(Node):
 
     def handle_middle(self, event_value: int):
         if event_value == 1:
-            if not self.already_middle_pub:
-                self._set_deadzone(0.95)
-                self.already_middle_pub = True
-                msg = Bool()
-                msg.data = True
-                self.middle_pedal_pub.publish(msg)
+            if not self.middle_pedal_pressed:
+                self.middle_pedal_pressed = True
+                self.publish_middle_pedal_state()
                 print("middle pedal: pressed")
         elif event_value == 0:
-            if self.already_middle_pub:
-                self._set_deadzone(1.0)
-                self.already_middle_pub = False
-                msg = Bool()
-                msg.data = False
-                self.middle_pedal_pub.publish(msg)
+            if self.middle_pedal_pressed:
+                self.middle_pedal_pressed = False
+                self.publish_middle_pedal_state()
                 print("middle pedal: released")
 
     def handle_right(self, event_value: int):
@@ -171,8 +155,8 @@ class FootSwitchReader(Node):
             data = os.read(self.fd, INPUT_EVENT_SIZE)
 
             if len(data) != INPUT_EVENT_SIZE:
-                print(f"Incomplete input event: {len(data)} bytes")
-                continue
+                raise RuntimeError(
+                    f"Incomplete input event: {len(data)} bytes")
 
             _, _, event_type, event_code, event_value = struct.unpack(
                 INPUT_EVENT_FORMAT, data
@@ -198,6 +182,8 @@ def main(args=None):
     except KeyboardInterrupt:
         print("\nStopped by user")
     finally:
+        reader.middle_pedal_pressed = False
+        reader.publish_middle_pedal_state()
         reader.close_device()
         reader.destroy_node()
         rclpy.shutdown()

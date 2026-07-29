@@ -278,6 +278,14 @@ void JoystickController::publish_joystick_values()
 void JoystickController::handle_tact_switches(
   bool left_tact_pressed, bool right_tact_pressed, const rclcpp::Time & current_time)
 {
+  const bool middle_pedal_signal_fresh = middle_pedal_signal_is_fresh(current_time);
+  const bool middle_pedal_reported_pressed =
+    middle_pedal_held_.load(std::memory_order_relaxed);
+  const bool middle_pedal_held =
+    middle_pedal_reported_pressed && middle_pedal_signal_fresh;
+  const bool stale_pressed_pedal =
+    middle_pedal_reported_pressed && !middle_pedal_signal_fresh;
+
   // Create current state as bit pattern: left=bit1, right=bit0
   // 00 = neither pressed, 01 = right only, 10 = left only, 11 = both pressed
   uint8_t current_state = (left_tact_pressed ? 2 : 0) | (right_tact_pressed ? 1 : 0);
@@ -296,7 +304,7 @@ void JoystickController::handle_tact_switches(
   }
 
   // Check for long press on left tact switch
-  if (left_tact_pressed && !left_tact_long_press_triggered_) {
+  if (left_tact_pressed && !left_tact_long_press_triggered_ && !stale_pressed_pedal) {
     auto press_duration = current_time - left_tact_press_start_time_;
     if (press_duration.seconds() >= params_.long_press_duration) {
       std_msgs::msg::String trigger_msg;
@@ -308,63 +316,69 @@ void JoystickController::handle_tact_switches(
   }
 
   // Check for long press on right tact switch
-  if (right_tact_pressed && !right_tact_long_press_triggered_) {
+  if (right_tact_pressed && !right_tact_long_press_triggered_ && !stale_pressed_pedal) {
     auto press_duration = current_time - right_tact_press_start_time_;
     if (press_duration.seconds() >= params_.long_press_duration) {
       std_msgs::msg::String trigger_msg;
-      trigger_msg.data = middle_pedal_held_ ? "right_long_time_middle" : "right_long_time";
+      trigger_msg.data = middle_pedal_held ? "right_long_time_middle" : "right_long_time";
       tact_trigger_pub_->publish(trigger_msg);
       RCLCPP_INFO(
         get_node()->get_logger(), "Right tact switch long press triggered! (middle: %s)",
-        middle_pedal_held_ ? "held" : "not held");
+        middle_pedal_held ? "held" : "not held");
       right_tact_long_press_triggered_ = true;
     }
   }
 
   // Only trigger actions when reaching 00 state (no buttons pressed)
   if (current_state == 0 && prev_state != 0) {
-    switch (prev_state) {
-      case 1:  // 01 -> 00 (right button only was pressed)
-        if (!right_tact_long_press_triggered_) {
-          if (middle_pedal_held_) {
-            std_msgs::msg::String trigger_msg;
-            trigger_msg.data = "right";
-            tact_trigger_pub_->publish(trigger_msg);
-            RCLCPP_INFO(get_node()->get_logger(), "Right tact trigger (middle pedal held)");
-          } else {
-            std_msgs::msg::UInt8 enable_msg;
-            enable_msg.data = 2;
-            right_enable_pub_->publish(enable_msg);
-            RCLCPP_INFO(get_node()->get_logger(), "Right toggle pub");
+    if (stale_pressed_pedal) {
+      RCLCPP_WARN(
+        get_node()->get_logger(),
+        "Ignoring tact release because the pressed middle-pedal heartbeat is stale");
+    } else {
+      switch (prev_state) {
+        case 1:  // 01 -> 00 (right button only was pressed)
+          if (!right_tact_long_press_triggered_) {
+            if (middle_pedal_held) {
+              std_msgs::msg::String trigger_msg;
+              trigger_msg.data = "right";
+              tact_trigger_pub_->publish(trigger_msg);
+              RCLCPP_INFO(get_node()->get_logger(), "Right tact trigger (middle pedal held)");
+            } else {
+              std_msgs::msg::UInt8 enable_msg;
+              enable_msg.data = 2;
+              right_enable_pub_->publish(enable_msg);
+              RCLCPP_INFO(get_node()->get_logger(), "Right toggle pub");
+            }
           }
-        }
-        break;
+          break;
 
-      case 2:  // 10 -> 00 (left button only was pressed)
-        if (!left_tact_long_press_triggered_) {
-          if (middle_pedal_held_) {
-            std_msgs::msg::String trigger_msg;
-            trigger_msg.data = "left";
-            tact_trigger_pub_->publish(trigger_msg);
-            RCLCPP_INFO(get_node()->get_logger(), "Left tact trigger (middle pedal held)");
-          } else {
+        case 2:  // 10 -> 00 (left button only was pressed)
+          if (!left_tact_long_press_triggered_) {
+            if (middle_pedal_held) {
+              std_msgs::msg::String trigger_msg;
+              trigger_msg.data = "left";
+              tact_trigger_pub_->publish(trigger_msg);
+              RCLCPP_INFO(get_node()->get_logger(), "Left tact trigger (middle pedal held)");
+            } else {
+              std_msgs::msg::UInt8 enable_msg;
+              enable_msg.data = 2;
+              left_enable_pub_->publish(enable_msg);
+              RCLCPP_INFO(get_node()->get_logger(), "Left toggle pub");
+            }
+          }
+          break;
+
+        case 3:  // 11 -> 00 (both buttons were pressed)
+          if ((!left_tact_long_press_triggered_) && (!right_tact_long_press_triggered_)) {
             std_msgs::msg::UInt8 enable_msg;
             enable_msg.data = 2;
             left_enable_pub_->publish(enable_msg);
-            RCLCPP_INFO(get_node()->get_logger(), "Left toggle pub");
+            right_enable_pub_->publish(enable_msg);
+            RCLCPP_INFO(get_node()->get_logger(), "both toggle pub");
           }
-        }
-        break;
-
-      case 3:  // 11 -> 00 (both buttons were pressed)
-        if ((!left_tact_long_press_triggered_) && (!right_tact_long_press_triggered_)) {
-          std_msgs::msg::UInt8 enable_msg;
-          enable_msg.data = 2;
-          left_enable_pub_->publish(enable_msg);
-          right_enable_pub_->publish(enable_msg);
-          RCLCPP_INFO(get_node()->get_logger(), "both toggle pub");
-        }
-        break;
+          break;
+      }
     }
 
     // Reset long press flags when buttons are released
@@ -379,6 +393,35 @@ void JoystickController::handle_tact_switches(
   // Update previous state
   prev_left_tact_switch_ = left_tact_pressed;
   prev_right_tact_switch_ = right_tact_pressed;
+}
+
+bool JoystickController::middle_pedal_signal_is_fresh(const rclcpp::Time & current_time) const
+{
+  const int64_t last_update_ns =
+    middle_pedal_last_update_ns_.load(std::memory_order_relaxed);
+  const int64_t current_ns = current_time.nanoseconds();
+  if (last_update_ns <= 0 || current_ns < last_update_ns) {
+    return false;
+  }
+
+  const double age_sec =
+    static_cast<double>(current_ns - last_update_ns) / 1'000'000'000.0;
+  return age_sec <= params_.middle_pedal_timeout_sec;
+}
+
+bool JoystickController::middle_pedal_is_active(const rclcpp::Time & current_time) const
+{
+  return middle_pedal_held_.load(std::memory_order_relaxed) &&
+         middle_pedal_signal_is_fresh(current_time);
+}
+
+void JoystickController::stop_mobile_base_commands()
+{
+  middle_pedal_held_.store(false, std::memory_order_relaxed);
+  middle_pedal_last_update_ns_.store(0, std::memory_order_relaxed);
+  if (cmd_vel_pub_) {
+    publish_cmd_vel(JoystickValues{});
+  }
 }
 
 controller_interface::InterfaceConfiguration
@@ -442,6 +485,10 @@ controller_interface::return_type JoystickController::update(
   }
 
   const bool joystick_update_enabled = params_.enable_joystick_update;
+  const bool joint_jog_enabled =
+    joystick_update_enabled && params_.enable_joint_jog_update;
+  const bool cmd_vel_enabled =
+    joystick_update_enabled && params_.enable_cmd_vel_update;
   JoystickValues joystick_values;
   bool left_tact_switch_pressed = false;
   bool right_tact_switch_pressed = false;
@@ -454,25 +501,21 @@ controller_interface::return_type JoystickController::update(
     const auto & controlled_joints = sensor_controlled_joints_[sensor_name];
     auto & last_active_positions = sensor_last_active_positions_[sensor_name];
 
-    // Read all joystick interfaces so tact-switch features still work even when motion is disabled.
+    // Always read all interfaces. Command outputs are gated independently below,
+    // while tact-switch and diagnostic state remain available.
     std::vector<double> normalized_values = read_and_normalize_sensor_values(sensor_idx);
-    if (!joystick_update_enabled) {
-      for (size_t j = 0; j < normalized_values.size(); ++j) {
-        if (j != constants::TACT_SWITCH_INTERFACE_INDEX) {
-          normalized_values[j] = 0.0;
-        }
-      }
-    }
 
-    // Motion activity only depends on joystick axes, not the tact switch state.
+    // Auxiliary-joint activity only depends on joystick axes, not the tact switch state.
     bool any_sensorxel_joy_active = false;
-    for (size_t j = 0; j < normalized_values.size(); ++j) {
-      if (j == constants::TACT_SWITCH_INTERFACE_INDEX) {
-        continue;
-      }
-      if (std::abs(normalized_values[j]) > 0.0) {
-        any_sensorxel_joy_active = true;
-        break;
+    if (joint_jog_enabled) {
+      for (size_t j = 0; j < normalized_values.size(); ++j) {
+        if (j == constants::TACT_SWITCH_INTERFACE_INDEX) {
+          continue;
+        }
+        if (std::abs(normalized_values[j]) > 0.0) {
+          any_sensorxel_joy_active = true;
+          break;
+        }
       }
     }
 
@@ -499,7 +542,7 @@ controller_interface::return_type JoystickController::update(
 
     // Publish joint trajectory
     if (
-      joystick_update_enabled && !current_joint_states_.name.empty() && !controlled_joints.empty())
+      joint_jog_enabled && !current_joint_states_.name.empty() && !controlled_joints.empty())
     {
       std::vector<double> positions;
 
@@ -525,8 +568,16 @@ controller_interface::return_type JoystickController::update(
     sensorxel_joy_values_[sensor_idx] = normalized_values;
   }
 
-  // Publish cmd_vel
-  publish_cmd_vel(joystick_values);
+  // Gate mobile-base commands separately from auxiliary-joint jog. Publishing
+  // an explicit zero Twist on every disabled cycle makes pedal release,
+  // heartbeat timeout, and configuration disable fail closed.
+  const bool pedal_gate_open =
+    !params_.require_middle_pedal_for_cmd_vel || middle_pedal_is_active(time);
+  if (cmd_vel_enabled && pedal_gate_open) {
+    publish_cmd_vel(joystick_values);
+  } else {
+    publish_cmd_vel(JoystickValues{});
+  }
 
   // Publish joystick values
   publish_joystick_values();
@@ -576,8 +627,15 @@ controller_interface::CallbackReturn JoystickController::on_configure(
     return controller_interface::CallbackReturn::ERROR;
   }
 
+  if (params_.middle_pedal_timeout_sec <= 0.0) {
+    RCLCPP_ERROR(
+      logger, "Invalid middle_pedal_timeout_sec %.3f; it must be greater than zero.",
+      params_.middle_pedal_timeout_sec);
+    return controller_interface::CallbackReturn::ERROR;
+  }
+
   if (!params_.enable_joystick_update) {
-    RCLCPP_INFO(logger, "Joystick updates are disabled by parameter.");
+    RCLCPP_INFO(logger, "All joystick X/Y command outputs are disabled.");
   }
 
   // Get sensorxel_joy sensor names from parameters
@@ -709,8 +767,19 @@ controller_interface::CallbackReturn JoystickController::on_configure(
   middle_pedal_sub_ = get_node()->create_subscription<std_msgs::msg::Bool>(
     "/leader/foot_switch/middle_pedal", 10,
     [this](const std_msgs::msg::Bool::SharedPtr msg) {
-      middle_pedal_held_ = msg->data;
+      middle_pedal_held_.store(msg->data, std::memory_order_relaxed);
+      middle_pedal_last_update_ns_.store(
+        get_node()->now().nanoseconds(), std::memory_order_relaxed);
     });
+
+  RCLCPP_INFO(
+    get_node()->get_logger(),
+    "Joystick command gates: joint_jog=%s, cmd_vel=%s, middle_pedal_required=%s, "
+    "middle_pedal_timeout=%.3fs",
+    (params_.enable_joystick_update && params_.enable_joint_jog_update) ? "enabled" : "disabled",
+    (params_.enable_joystick_update && params_.enable_cmd_vel_update) ? "enabled" : "disabled",
+    params_.require_middle_pedal_for_cmd_vel ? "true" : "false",
+    params_.middle_pedal_timeout_sec);
 
   RCLCPP_INFO(get_node()->get_logger(), "JoystickController configured successfully.");
   return CallbackReturn::SUCCESS;
@@ -750,6 +819,7 @@ controller_interface::CallbackReturn JoystickController::on_activate(
 controller_interface::CallbackReturn JoystickController::on_deactivate(
   const rclcpp_lifecycle::State & /*previous_state*/)
 {
+  stop_mobile_base_commands();
   RCLCPP_INFO(get_node()->get_logger(), "JoystickController deactivated successfully.");
   return CallbackReturn::SUCCESS;
 }
@@ -757,18 +827,21 @@ controller_interface::CallbackReturn JoystickController::on_deactivate(
 controller_interface::CallbackReturn JoystickController::on_cleanup(
   const rclcpp_lifecycle::State & /*previous_state*/)
 {
+  stop_mobile_base_commands();
   return CallbackReturn::SUCCESS;
 }
 
 controller_interface::CallbackReturn JoystickController::on_error(
   const rclcpp_lifecycle::State & /*previous_state*/)
 {
+  stop_mobile_base_commands();
   return CallbackReturn::SUCCESS;
 }
 
 controller_interface::CallbackReturn JoystickController::on_shutdown(
   const rclcpp_lifecycle::State & /*previous_state*/)
 {
+  stop_mobile_base_commands();
   return CallbackReturn::SUCCESS;
 }
 }  // namespace joystick_controller

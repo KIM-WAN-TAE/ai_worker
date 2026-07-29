@@ -120,4 +120,8 @@
       sensorxel_l_joy_jog_scale: 0.06
       sensorxel_r_joy_jog_scale: 0.01
       deadzone: 0.05
-      enable_joystick_update: false
+      enable_joystick_update: true
+      enable_joint_jog_update: false
+      enable_cmd_vel_update: false
+      require_middle_pedal_for_cmd_vel: true
+      middle_pedal_timeout_sec: 0.5

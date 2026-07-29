@@ -15,6 +15,8 @@
 #ifndef JOYSTICK_CONTROLLER__JOYSTICK_CONTROLLER_HPP_
 #define JOYSTICK_CONTROLLER__JOYSTICK_CONTROLLER_HPP_
 
+#include <atomic>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
@@ -120,6 +122,9 @@ protected:
   void publish_joystick_values();
   void handle_tact_switches(
     bool left_tact_pressed, bool right_tact_pressed, const rclcpp::Time & current_time);
+  bool middle_pedal_signal_is_fresh(const rclcpp::Time & current_time) const;
+  bool middle_pedal_is_active(const rclcpp::Time & current_time) const;
+  void stop_mobile_base_commands();
   std::vector<std::string> sensorxel_joy_names_;
   std::vector<std::string> state_interface_types_ = {"JOYSTICK X VALUE", "JOYSTICK Y VALUE",
     "JOYSTICK TACT SWITCH"};
@@ -167,7 +172,8 @@ protected:
   rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr left_enable_pub_;
   rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr right_enable_pub_;
 
-  bool middle_pedal_held_ = false;
+  std::atomic_bool middle_pedal_held_{false};
+  std::atomic<int64_t> middle_pedal_last_update_ns_{0};
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr middle_pedal_sub_;
 };
 
