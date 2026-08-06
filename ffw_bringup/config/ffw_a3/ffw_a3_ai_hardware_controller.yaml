@@ -125,6 +125,6 @@
       deadzone: 0.05
       enable_joystick_update: true
       enable_joint_jog_update: false
-      enable_cmd_vel_update: true
+      enable_cmd_vel_update: false
       require_middle_pedal_for_cmd_vel: true
       middle_pedal_timeout_sec: 0.5

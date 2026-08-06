@@ -462,8 +462,8 @@ node가 정상 종료될 때 middle false를 한 번 발행하도록 구현돼 �
 | right long press | middle released | tact trigger `"right_long_time"` |
 | tact release | 마지막 middle이 pressed인데 heartbeat가 0.5초 초과 | action 억제 |
 
-fresh middle + short right의 `"right"`는 recording save/start toggle, short
-left의 `"left"`는 recording discard 용도로 계약돼 있다. 다만 2026-07-30 라이브
+fresh middle + short left의 `"left"`는 recording save/start toggle, short
+right의 `"right"`는 recording discard 용도로 계약돼 있다. 다만 2026-07-30 라이브
 snapshot에서는 이 tact trigger 토픽의 구독자가 0이었으므로, 문자열 발행만으로
 기록 동작이 완료된다고 판단하면 안 된다.
 
