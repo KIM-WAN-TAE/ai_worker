@@ -44,7 +44,7 @@ source ${COLCON_WS}/install/setup.bash
 # while the model session itself is STOPPED.  Fail closed if discovery cannot
 # complete, because an unchecked bringup can race an existing command
 # publisher and move hardware unexpectedly.
-if [ "${SERVICE_NAME}" = "ai_worker_bringup" ]; then
+if [ "${SERVICE_NAME}" = "ai_worker_bringup" ] || [ "${SERVICE_NAME}" = "avatar_bringup" ]; then
     INFERENCE_SERVICES_FILE=$(mktemp)
     if ! timeout 8s ros2 service list > "${INFERENCE_SERVICES_FILE}"; then
         echo "[${SERVICE_NAME}] SAFETY BLOCK: could not verify that inference containers are stopped." >&2
@@ -61,7 +61,91 @@ if [ "${SERVICE_NAME}" = "ai_worker_bringup" ]; then
         echo "[${SERVICE_NAME}] STOP, UNLOAD, and stop all inference containers before bringup." >&2
         exit 64
     fi
+
+    # Newer policy runtimes may expose read-only RTC telemetry before (or
+    # without) the command service becoming discoverable in this container.
+    # A live RTC publisher still proves that a policy process capable of
+    # reconnecting to robot command topics exists, so startup remains blocked.
+    for RTC_TOPIC in /groot/rtc_status /lerobot/rtc_status; do
+        RTC_TOPIC_INFO=$(mktemp)
+        if timeout 5s ros2 topic info "${RTC_TOPIC}" > "${RTC_TOPIC_INFO}" 2>/dev/null; then
+            RTC_PUBLISHERS=$(sed -n 's/^Publisher count: //p' "${RTC_TOPIC_INFO}" | tr -d '[:space:]')
+            if [ -n "${RTC_PUBLISHERS}" ] && [ "${RTC_PUBLISHERS}" -gt 0 ]; then
+                echo "[${SERVICE_NAME}] SAFETY BLOCK: policy runtime is publishing ${RTC_TOPIC}." >&2
+                echo "[${SERVICE_NAME}] STOP, UNLOAD, and stop the policy container before hardware startup." >&2
+                rm -f "${RTC_TOPIC_INFO}" "${INFERENCE_SERVICES_FILE}"
+                exit 64
+            fi
+        fi
+        rm -f "${RTC_TOPIC_INFO}"
+    done
+
+    for COMMAND_TOPIC in \
+        /leader/joint_trajectory_command_broadcaster_left/joint_trajectory \
+        /leader/joint_trajectory_command_broadcaster_right/joint_trajectory \
+        /leader/joystick_controller_left/joint_trajectory \
+        /leader/joystick_controller_right/joint_trajectory; do
+        COMMAND_TOPIC_INFO=$(mktemp)
+        if timeout 5s ros2 topic info "${COMMAND_TOPIC}" > "${COMMAND_TOPIC_INFO}" 2>/dev/null; then
+            COMMAND_PUBLISHERS=$(sed -n 's/^Publisher count: //p' "${COMMAND_TOPIC_INFO}" | tr -d '[:space:]')
+            if [ -n "${COMMAND_PUBLISHERS}" ] && [ "${COMMAND_PUBLISHERS}" -gt 0 ]; then
+                echo "[${SERVICE_NAME}] SAFETY BLOCK: command publisher is connected to ${COMMAND_TOPIC}." >&2
+                echo "[${SERVICE_NAME}] Stop the command source before starting robot hardware." >&2
+                rm -f "${COMMAND_TOPIC_INFO}"
+                exit 64
+            fi
+        fi
+        rm -f "${COMMAND_TOPIC_INFO}"
+    done
     echo "[${SERVICE_NAME}] Inference-container preflight passed."
+fi
+
+# A Leader is a command source, so never start it before a complete Follower
+# control stack is observable.  This protects direct s6 starts as well as the
+# web API gate.  The web supervisor additionally checks freshness and DXL
+# error values before requesting this service.
+if [ "${SERVICE_NAME}" = "avatar_bringup" ]; then
+    for FOLLOWER_TOPIC in \
+        /joint_states \
+        /ffw_follower/dxl_state \
+        /arm_l_controller/controller_state \
+        /arm_r_controller/controller_state \
+        /head_controller/controller_state \
+        /lift_controller/controller_state; do
+        FOLLOWER_TOPIC_INFO=$(mktemp)
+        if ! timeout 5s ros2 topic info "${FOLLOWER_TOPIC}" > "${FOLLOWER_TOPIC_INFO}" 2>/dev/null; then
+            echo "[${SERVICE_NAME}] SAFETY BLOCK: cannot verify Follower topic ${FOLLOWER_TOPIC}." >&2
+            rm -f "${FOLLOWER_TOPIC_INFO}"
+            exit 64
+        fi
+        FOLLOWER_PUBLISHERS=$(sed -n 's/^Publisher count: //p' "${FOLLOWER_TOPIC_INFO}" | tr -d '[:space:]')
+        rm -f "${FOLLOWER_TOPIC_INFO}"
+        if [ -z "${FOLLOWER_PUBLISHERS}" ] || [ "${FOLLOWER_PUBLISHERS}" -lt 1 ]; then
+            echo "[${SERVICE_NAME}] SAFETY BLOCK: Follower is not ready (${FOLLOWER_TOPIC} has no publisher)." >&2
+            echo "[${SERVICE_NAME}] Bring up the Follower and verify controllers, feedback, and DXL first." >&2
+            exit 64
+        fi
+    done
+    echo "[${SERVICE_NAME}] Follower-first preflight passed."
+fi
+
+# Follower startup is also blocked while a Leader publisher is alive.  A
+# newly spawned follower controller subscribes to these streams immediately;
+# allowing startup in that state can make the first cached/current command
+# look like a large step on real hardware.
+if [ "${SERVICE_NAME}" = "ai_worker_bringup" ]; then
+    LEADER_TOPIC_INFO=$(mktemp)
+    if timeout 5s ros2 topic info /leader/joint_states > "${LEADER_TOPIC_INFO}" 2>/dev/null; then
+        LEADER_PUBLISHERS=$(sed -n 's/^Publisher count: //p' "${LEADER_TOPIC_INFO}" | tr -d '[:space:]')
+        if [ -n "${LEADER_PUBLISHERS}" ] && [ "${LEADER_PUBLISHERS}" -gt 0 ]; then
+            echo "[${SERVICE_NAME}] SAFETY BLOCK: Leader is publishing /leader/joint_states." >&2
+            echo "[${SERVICE_NAME}] Stop the Leader and wait for its command publishers to disappear." >&2
+            rm -f "${LEADER_TOPIC_INFO}"
+            exit 64
+        fi
+    fi
+    rm -f "${LEADER_TOPIC_INFO}"
+    echo "[${SERVICE_NAME}] Leader-publisher preflight passed."
 fi
 
 # Determine the command to execute

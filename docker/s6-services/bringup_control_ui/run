@@ -1,0 +1,4 @@
+#!/command/with-contenv bash
+set -e
+
+exec /root/ros2_ws/src/ai_worker/docker/bringup_control_ui/run.sh

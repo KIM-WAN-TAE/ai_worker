@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>AI Worker Control</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body data-robot-mode="idle">
+  <div id="critical-banner" class="critical-banner hidden" role="alert">
+    <span class="critical-pulse" aria-hidden="true"></span>
+    <div>
+      <strong>E-STOP / CRITICAL FAULT</strong>
+      <p id="critical-message">로봇에서 물러나 원인을 확인하세요.</p>
+      <small>자동 재기동하지 않습니다. 로봇을 안전한 원래 위치로 정리한 뒤 정상 Bring-up 절차를 다시 수행하세요.</small>
+    </div>
+  </div>
+
+  <div class="app-layout">
+    <aside class="sidebar" aria-label="주 메뉴">
+      <a class="side-brand" href="#home" data-nav-page="home" aria-label="AI Worker Home">
+        <span class="brand-symbol">AI</span>
+        <strong>Worker</strong>
+      </a>
+      <nav class="side-nav">
+        <button class="nav-item active" data-page="home" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11 12 3l9 8v10h-6v-6H9v6H3Z"/></svg>
+          <span>Home</span>
+        </button>
+        <button id="nav-teleop" class="nav-item" data-page="teleop" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7h10a5 5 0 0 1 4.8 6.4l-1.1 3.8a2.5 2.5 0 0 1-4.3.9L14.6 16H9.4l-1.8 2.1a2.5 2.5 0 0 1-4.3-.9l-1.1-3.8A5 5 0 0 1 7 7Zm1 3v2H6v2h2v2h2v-2h2v-2h-2v-2Zm7.5 1.2a1.2 1.2 0 1 0 0 2.4 1.2 1.2 0 0 0 0-2.4Zm3 2.8a1.2 1.2 0 1 0 0 2.4 1.2 1.2 0 0 0 0-2.4Z"/></svg>
+          <span>Teleop</span><i class="mode-dot"></i>
+        </button>
+        <button id="nav-inference" class="nav-item" data-page="inference" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 2h6v3h2a4 4 0 0 1 4 4v6a4 4 0 0 1-4 4h-2v3H9v-3H7a4 4 0 0 1-4-4V9a4 4 0 0 1 4-4h2Zm-2 7v6h10V9Zm2 1h2v2H9Zm4 0h2v2h-2Z"/></svg>
+          <span>Inference</span><i class="mode-dot"></i>
+        </button>
+        <button class="nav-item" data-page="system" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h16v4H4Zm0 6h16v4H4Zm0 6h16v4H4Zm2-10h2v1H6Zm0 6h2v1H6Zm0 6h2v1H6Z"/></svg>
+          <span>System</span>
+        </button>
+      </nav>
+      <div class="side-footer">
+        <span id="side-connection" class="connection-dot"></span>
+        <small>ROS</small>
+      </div>
+    </aside>
+
+    <div class="app-main">
+      <header class="topbar">
+        <div>
+          <span id="page-kicker" class="page-kicker">AI WORKER</span>
+          <strong id="page-name">Home</strong>
+        </div>
+        <div class="header-actions">
+          <span id="global-mode-chip" class="mode-chip idle"><i></i><b>STANDBY</b></span>
+          <span id="connection" class="status-pill neutral"><i></i> 연결 중</span>
+          <button id="token-button" class="text-button">제어 인증</button>
+        </div>
+      </header>
+
+      <main class="page-shell">
+        <section class="app-page active" data-page-content="home">
+          <div class="page-title">
+            <div><span class="eyebrow">ROBOT SETUP</span><h1>Home</h1></div>
+            <span id="estop-status" class="estop-chip">확인 중</span>
+          </div>
+
+          <section id="home-mode-banner" class="mode-hero idle">
+            <div class="mode-orb"><i></i></div>
+            <div><span>CURRENT MODE</span><strong id="home-mode-label">STANDBY</strong></div>
+          </section>
+
+          <section class="setup-grid">
+            <article class="setup-card">
+              <span class="card-kicker">ROBOT TYPE</span>
+              <h2>Follower Robot</h2>
+              <label for="follower-model">Robot type</label>
+              <select id="follower-model"></select>
+            </article>
+            <article class="setup-card">
+              <span class="card-kicker teleop-text">LEADER TYPE</span>
+              <h2>Teleop Leader</h2>
+              <label for="leader-model">Leader type</label>
+              <select id="leader-model"></select>
+            </article>
+          </section>
+
+          <section class="status-grid" aria-label="실시간 상태">
+            <div class="status-card"><span>Follower</span><strong id="follower-status">확인 중</strong></div>
+            <div class="status-card"><span>Leader</span><strong id="leader-status">확인 중</strong></div>
+            <div class="status-card"><span>Inference</span><strong id="inference-status">확인 중</strong></div>
+            <div class="status-card"><span>Hardware</span><strong id="hardware-status">확인 중</strong></div>
+          </section>
+
+          <article class="section-card lifecycle-card">
+            <div class="section-heading">
+              <div><span class="card-kicker">ROBOT LIFECYCLE</span><strong>Robot Control</strong></div>
+              <span id="follower-badge" class="badge neutral">DOWN</span>
+            </div>
+            <div class="lifecycle-actions">
+              <div class="action-tile primary-tile"><span>01</span><strong>Bring up</strong><button id="follower-start" class="button primary">Bring up</button></div>
+              <div class="action-tile"><span>02</span><strong>Bring down</strong><button id="bring-down" class="button secondary">Bring down</button></div>
+              <div class="action-tile recovery-tile"><span>03</span><strong>Init pose</strong><label class="check-row"><input id="workspace-confirm" type="checkbox"><span>경로에 사람과 물체가 없습니다.</span></label><button id="recover-init" class="button warning">Init pose</button></div>
+            </div>
+            <div class="lifecycle-footer">
+              <button id="follower-stop" class="button quiet">Follower control 종료</button>
+            </div>
+          </article>
+        </section>
+
+        <section class="app-page mode-page teleop-page" data-page-content="teleop">
+          <div class="page-title">
+            <div><span class="eyebrow teleop-text">TELEOPERATION</span><h1>Teleop Mode</h1></div>
+            <span id="teleop-page-badge" class="mode-page-badge">OFF</span>
+          </div>
+          <section id="teleop-mode-panel" class="mode-stage teleop-stage">
+            <div><span>LIVE MODE</span><h2 id="teleop-stage-title">Teleop 대기</h2></div>
+            <div class="signal-visual"><i></i><i></i><i></i></div>
+          </section>
+          <section class="mode-control-grid">
+            <article class="section-card control-panel teleop-panel">
+              <div class="section-heading"><div><span class="card-kicker teleop-text">LEADER CONTROL</span><strong id="teleop-leader-name">A3 Leader</strong></div><span id="leader-badge" class="badge neutral">OFF</span></div>
+              <div class="two-actions"><button id="leader-start" class="button teleop-primary">Leader on</button><button id="leader-stop" class="button secondary">Leader off</button></div>
+            </article>
+            <article class="section-card control-panel recovery-panel">
+              <span class="card-kicker">POST-TELEOP RECOVERY</span>
+              <h2>Init pose로 복구</h2>
+              <label class="check-row"><input id="workspace-confirm-teleop" type="checkbox"><span>경로에 사람과 물체가 없습니다.</span></label>
+              <button id="recover-init-teleop" class="button warning">Init pose</button>
+            </article>
+          </section>
+        </section>
+
+        <section class="app-page mode-page inference-page" data-page-content="inference">
+          <div class="page-title">
+            <div><span class="eyebrow inference-text">POLICY RUNTIME</span><h1>Inference Mode</h1></div>
+            <span id="inference-page-badge" class="mode-page-badge">DISCONNECTED</span>
+          </div>
+          <section id="inference-mode-panel" class="mode-stage inference-stage">
+            <div><span>LIVE MODE</span><h2 id="inference-stage-title">Inference 대기</h2></div>
+            <div class="brain-visual"><i></i><i></i><i></i><i></i></div>
+          </section>
+          <section class="mode-control-grid">
+            <article class="section-card control-panel inference-panel">
+              <span class="card-kicker inference-text">CYCLO INTELLIGENCE</span>
+              <h2>Inference 상태</h2>
+              <div class="phase-display"><strong id="inference-phase-large">UNAVAILABLE</strong></div>
+            </article>
+            <article class="section-card control-panel recovery-panel">
+              <span class="card-kicker">POST-INFERENCE RECOVERY</span>
+              <h2>Init pose로 복구</h2>
+              <label class="check-row"><input id="workspace-confirm-inference" type="checkbox"><span>경로에 사람과 물체가 없습니다.</span></label>
+              <button id="recover-init-inference" class="button warning">Init pose</button>
+            </article>
+          </section>
+        </section>
+
+        <section class="app-page" data-page-content="system">
+          <div class="page-title">
+            <div><span class="eyebrow">DIAGNOSTICS</span><h1>System</h1></div>
+            <span id="safe-count" class="safe-count">—</span>
+          </div>
+          <section class="monitor-grid">
+            <article class="section-card monitor-block"><div class="section-heading"><div><strong>안전 조건</strong><small>실시간 interlock</small></div></div><div id="safety-checks" class="check-list"></div></article>
+            <article class="section-card monitor-block"><div class="inline-heading"><div><strong>원인 진단</strong><small>launch warning · failure</small></div><button id="open-logs" class="text-button">전체 로그</button></div><div id="diagnostics" class="diagnostic-list"><div class="empty-state">분석할 경고가 없습니다.</div></div></article>
+            <article class="section-card monitor-block wide"><div class="section-heading"><div><strong>최근 이벤트</strong><small>공유 제어 이력</small></div></div><div id="events" class="event-list"></div></article>
+          </section>
+        </section>
+
+        <section id="operation-panel" class="section-card operation-card hidden">
+          <div class="section-heading"><div><strong>현재 작업</strong></div><span id="operation-badge" class="badge neutral">IDLE</span></div>
+          <div id="operation-content" class="empty-state">실행 중인 작업이 없습니다.</div>
+          <button id="cancel-operation" class="button danger hidden">동작 즉시 중단</button>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <div id="modal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-card">
+      <button id="modal-close" class="close-button" aria-label="닫기">×</button>
+      <span class="card-kicker">SAFETY CONFIRMATION</span>
+      <h2 id="modal-title">작업 확인</h2>
+      <p id="modal-description"></p>
+      <div id="modal-warnings" class="modal-warnings"></div>
+      <div class="modal-actions"><button id="modal-cancel" class="button secondary">취소</button><button id="modal-confirm" class="button primary">실행</button></div>
+    </div>
+  </div>
+
+  <div id="token-modal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-card small"><button id="token-close" class="close-button" aria-label="닫기">×</button><span class="card-kicker">CONTROL AUTHENTICATION</span><h2>제어 인증</h2><p>실제 로봇 제어 요청에만 사용하며 브라우저 탭을 닫으면 삭제됩니다.</p><label>Token<input id="token-input" type="password" autocomplete="off"></label><div class="modal-actions"><button id="token-save" class="button primary">저장</button></div></div>
+  </div>
+
+  <div id="blocked-modal" class="modal hidden" role="alertdialog" aria-modal="true">
+    <div class="modal-card small">
+      <button id="blocked-close" class="close-button" aria-label="닫기">×</button>
+      <span class="card-kicker">ACTION UNAVAILABLE</span>
+      <h2>지금은 실행할 수 없습니다</h2>
+      <div id="blocked-reasons" class="blocked-reasons"></div>
+      <div class="modal-actions"><button id="blocked-ok" class="button primary">확인</button></div>
+    </div>
+  </div>
+
+  <div id="log-drawer" class="drawer hidden">
+    <div class="drawer-head"><div><span class="card-kicker">LAUNCH OUTPUT</span><h2>로그</h2></div><button id="logs-close" class="close-button">×</button></div>
+    <div class="log-tools"><select id="log-source"><option value="follower">Follower</option><option value="leader">Leader</option><option value="operation">Pose 작업</option></select><button id="logs-refresh" class="button secondary">새로고침</button></div>
+    <pre id="raw-logs">로그를 불러오는 중...</pre>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

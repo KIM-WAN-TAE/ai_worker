@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+pid_file="/run/ai_worker_control.pid"
+port="${BRINGUP_CONTROL_PORT:-8780}"
+runner="/root/ros2_ws/src/ai_worker/docker/bringup_control_ui/run.sh"
+
+running_pid() {
+  if [ ! -f "${pid_file}" ]; then
+    return 1
+  fi
+  local pid
+  pid=$(tr -cd '0-9' < "${pid_file}")
+  if [ -z "${pid}" ] || ! kill -0 "${pid}" 2>/dev/null; then
+    rm -f "${pid_file}"
+    return 1
+  fi
+  local command_line
+  command_line=$(tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null || true)
+  if [[ "${command_line}" != *"uvicorn server:app"* ]]; then
+    echo "Ignoring stale AI Worker Control pid file (${pid}: ${command_line:-unknown process})." >&2
+    rm -f "${pid_file}"
+    return 1
+  fi
+  printf '%s\n' "${pid}"
+}
+
+stop_ui() {
+  local pid
+  if ! pid=$(running_pid); then
+    echo "AI Worker Control is not running."
+    return 0
+  fi
+  echo "Stopping AI Worker Control (pid ${pid})..."
+  kill -TERM "${pid}"
+  for _ in $(seq 1 30); do
+    if ! kill -0 "${pid}" 2>/dev/null; then
+      rm -f "${pid_file}"
+      echo "AI Worker Control stopped."
+      return 0
+    fi
+    sleep 0.1
+  done
+  echo "Graceful shutdown timed out; stopping the verified UI process." >&2
+  kill -KILL "${pid}" 2>/dev/null || true
+  for _ in $(seq 1 10); do
+    if ! kill -0 "${pid}" 2>/dev/null; then
+      rm -f "${pid_file}"
+      echo "AI Worker Control stopped."
+      return 0
+    fi
+    sleep 0.1
+  done
+  echo "AI Worker Control did not stop." >&2
+  return 1
+}
+
+case "${1:-start}" in
+  stop)
+    stop_ui
+    exit $?
+    ;;
+  status)
+    if pid=$(running_pid); then
+      echo "AI Worker Control is running (pid ${pid}, port ${port})."
+    else
+      echo "AI Worker Control is stopped."
+    fi
+    exit 0
+    ;;
+  start)
+    ;;
+  *)
+    echo "Usage: ai_worker_control [start|stop|status]" >&2
+    exit 2
+    ;;
+esac
+
+if pid=$(running_pid); then
+  echo "AI Worker Control is already running (pid ${pid})."
+  exit 0
+fi
+
+if curl -fsS --max-time 1 "http://127.0.0.1:${port}/api/state" >/dev/null 2>&1; then
+  echo "Port ${port} is already used by another control UI process." >&2
+  exit 1
+fi
+
+robot_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+echo "Starting AI Worker Control in shared physical-control mode."
+echo "URL: http://${robot_ip:-127.0.0.1}:${port}"
+echo "All clients on the robot LAN can request actions. Press Ctrl+C to stop."
+
+child_pid=""
+cleanup() {
+  if [ -n "${child_pid}" ] && kill -0 "${child_pid}" 2>/dev/null; then
+    kill -TERM "${child_pid}" 2>/dev/null || true
+    wait "${child_pid}" 2>/dev/null || true
+  fi
+  child_pid=""
+  rm -f "${pid_file}"
+}
+trap cleanup EXIT HUP INT TERM
+
+ENABLE_BRINGUP_CONTROL=true \
+BRINGUP_CONTROL_TOKEN="" \
+BRINGUP_CONTROL_HOST="0.0.0.0" \
+BRINGUP_CONTROL_PORT="${port}" \
+"${runner}" &
+child_pid=$!
+printf '%s\n' "${child_pid}" > "${pid_file}"
+
+set +e
+wait "${child_pid}"
+status=$?
+set -e
+child_pid=""
+exit "${status}"

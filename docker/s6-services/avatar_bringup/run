@@ -1,11 +1,29 @@
 #!/command/with-contenv bash
-# Avatar Bringup - LG2 Leader AI service
+# Avatar Bringup - selectable Leader AI service
 # Uses reusable ROS2 service template
 
 set -e
 
 SERVICE_NAME="avatar_bringup"
-ROS2_COMMAND="ros2 launch ffw_bringup ffw_lg2_leader_ai.launch.py"
+LEADER_TYPE_FILE="/run/leader_type"
+LEADER_TYPE="a3"
+if [ -f "${LEADER_TYPE_FILE}" ]; then
+    LEADER_TYPE=$(tr -d '[:space:]' < "${LEADER_TYPE_FILE}" | tr '[:upper:]' '[:lower:]')
+fi
+if [ "${LEADER_TYPE}" = "a3" ]; then
+    # The A3 gripper trigger currently treats an already-closed gripper as a
+    # fresh falling edge on startup and immediately commands save pose 3.
+    # Keep that shortcut disabled for UI-managed operation; the web recovery
+    # flow provides the explicit, interlocked init-pose action instead.
+    ROS2_COMMAND="ros2 launch ffw_bringup ffw_a3_ai.launch.py launch_gripper_trigger:=false"
+elif [ "${LEADER_TYPE}" = "a2" ]; then
+    ROS2_COMMAND="ros2 launch ffw_bringup ffw_a2_ai.launch.py"
+elif [ "${LEADER_TYPE}" = "lg2" ]; then
+    ROS2_COMMAND="ros2 launch ffw_bringup ffw_lg2_leader_ai.launch.py"
+else
+    echo "[${SERVICE_NAME}] Error: unsupported leader type '${LEADER_TYPE}' (supported: a3, a2, lg2)" >&2
+    exit 1
+fi
 COMMON_SCRIPT="/usr/local/lib/s6-services/ros2_service_run.sh"
 
 if [ -f "${COMMON_SCRIPT}" ]; then

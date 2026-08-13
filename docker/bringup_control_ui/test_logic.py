@@ -1,0 +1,163 @@
+import unittest
+
+try:
+    from .logic import FOLLOWER_MODELS, LEADER_MODELS, SafetyState, diagnose_lines, gate_action, operating_mode, parse_s6_status
+    from .recovery_config import default_config_path, load_recovery_groups
+except ImportError:
+    from logic import FOLLOWER_MODELS, LEADER_MODELS, SafetyState, diagnose_lines, gate_action, operating_mode, parse_s6_status
+    from recovery_config import default_config_path, load_recovery_groups
+
+
+class SafetyGateTest(unittest.TestCase):
+    def test_supported_leader_launches_include_operational_a3(self):
+        self.assertEqual(LEADER_MODELS["a3"]["launch"], "ffw_a3_ai.launch.py")
+        self.assertEqual(set(LEADER_MODELS), {"a3", "a2", "lg2"})
+
+    def test_only_f2_exposes_recovery_profile(self):
+        self.assertTrue(FOLLOWER_MODELS["f2"]["recover_init"])
+        self.assertTrue(FOLLOWER_MODELS["f2"]["recovery_yaml"].endswith("f2_follower_initial_positions.yaml"))
+        self.assertFalse(FOLLOWER_MODELS["sg2"]["recover_init"])
+
+    def healthy_f2(self, **overrides):
+        values = dict(
+            physical_control_enabled=True,
+            follower_up=True,
+            controllers_ready=True,
+            feedback_fresh=True,
+            dxl_ok=True,
+            selected_follower="f2",
+        )
+        values.update(overrides)
+        return SafetyState(**values)
+
+    def test_bring_down_requires_leader_off(self):
+        result = gate_action("bring_down", self.healthy_f2(leader_up=True))
+        self.assertFalse(result.ok)
+        self.assertTrue(any("Leader" in item for item in result.failures))
+
+    def test_bring_up_blocks_even_stopped_inference_container(self):
+        state = SafetyState(physical_control_enabled=True, inference_present=True)
+        result = gate_action("follower_start", state)
+        self.assertFalse(result.ok)
+        self.assertTrue(any("container" in item for item in result.failures))
+
+    def test_leader_start_requires_healthy_follower_first(self):
+        missing = gate_action("leader_start", SafetyState(physical_control_enabled=True))
+        self.assertFalse(missing.ok)
+        self.assertTrue(any("Follower를 먼저" in item for item in missing.failures))
+
+        unhealthy = gate_action(
+            "leader_start",
+            SafetyState(physical_control_enabled=True, follower_up=True),
+        )
+        self.assertFalse(unhealthy.ok)
+        self.assertTrue(any("controller" in item for item in unhealthy.failures))
+        self.assertTrue(any("DXL" in item for item in unhealthy.failures))
+
+        healthy = gate_action("leader_start", self.healthy_f2())
+        self.assertTrue(healthy.ok)
+
+    def test_recovery_happy_path_has_workspace_warning(self):
+        result = gate_action("recover_init", self.healthy_f2())
+        self.assertTrue(result.ok)
+        self.assertTrue(any("작업 공간" in item for item in result.warnings))
+
+    def test_only_active_pose_cancel_bypasses_control_lock(self):
+        state = SafetyState(follower_up=True)
+        self.assertFalse(gate_action("follower_stop", state).ok)
+        self.assertTrue(gate_action("operation_cancel", state).ok)
+
+    def test_unmanaged_runtime_blocks_duplicate_start_and_fake_stop(self):
+        state = SafetyState(
+            physical_control_enabled=True,
+            follower_up=True,
+            follower_managed=False,
+        )
+        self.assertFalse(gate_action("follower_start", state).ok)
+        stopped = gate_action("follower_stop", state)
+        self.assertFalse(stopped.ok)
+        self.assertTrue(any("UI 밖" in item for item in stopped.failures))
+
+    def test_motion_blocks_on_estop(self):
+        result = gate_action("recover_init", self.healthy_f2(estop_active=True))
+        self.assertFalse(result.ok)
+        self.assertTrue(any("E-stop" in item for item in result.failures))
+
+    def test_concurrent_user_action_is_blocked(self):
+        result = gate_action("leader_start", SafetyState(physical_control_enabled=True, control_busy=True))
+        self.assertFalse(result.ok)
+        self.assertTrue(any("다른 사용자" in item for item in result.failures))
+
+    def test_configured_estop_monitor_must_be_fresh(self):
+        result = gate_action("recover_init", self.healthy_f2(estop_signal_ready=False))
+        self.assertFalse(result.ok)
+        self.assertTrue(any("감시 토픽" in item for item in result.failures))
+
+
+class DiagnosticsTest(unittest.TestCase):
+    def test_diagnostics_are_deduplicated(self):
+        rows = diagnose_lines([
+            "failed to open port /dev/follower",
+            "could not open port /dev/follower",
+            "Waiting for action server...",
+        ])
+        self.assertEqual({row["title"] for row in rows}, {"로봇 포트 연결 실패", "Action Server 대기"})
+
+    def test_s6_parser(self):
+        parsed = parse_s6_status("up (pid 321) 18 seconds")
+        self.assertEqual(parsed["state"], "up")
+        self.assertEqual(parsed["pid"], 321)
+        self.assertEqual(parsed["uptime_s"], 18)
+
+
+class RecoveryConfigTest(unittest.TestCase):
+    def test_f2_recovery_plan_is_loaded_from_all_repeated_yaml_sections(self):
+        path = default_config_path("f2")
+        groups = load_recovery_groups("f2", path)
+        self.assertEqual(
+            {group.executor_name for group in groups},
+            {
+                "arm_l_joint_trajectory_executor",
+                "arm_r_joint_trajectory_executor",
+                "head_joint_trajectory_executor",
+                "lift_joint_trajectory_executor",
+            },
+        )
+        self.assertEqual([step.name for step in groups[0].steps], ["step0", "step1"])
+        head = next(group for group in groups if group.executor_name == "head_joint_trajectory_executor")
+        self.assertEqual([step.name for step in head.steps], ["home"])
+        self.assertNotIn("swerve", " ".join(group.executor_name for group in groups))
+
+    def test_unimplemented_sg2_recovery_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "지원하지 않는 복구 모델"):
+            load_recovery_groups("sg2")
+
+
+class OperatingModeTest(unittest.TestCase):
+    def test_leader_runtime_selects_teleop_mode(self):
+        mode = operating_mode(leader_up=True, inference_present=False, inference_active=False)
+        self.assertEqual(mode["name"], "teleop")
+
+    def test_paused_inference_session_remains_inference_mode(self):
+        mode = operating_mode(
+            leader_up=False,
+            inference_present=True,
+            inference_active=True,
+            inference_phase="PAUSED",
+        )
+        self.assertEqual(mode["name"], "inference")
+        self.assertIn("PAUSED", mode["detail"])
+
+    def test_simultaneous_leader_and_inference_is_conflict(self):
+        mode = operating_mode(
+            leader_up=True,
+            inference_present=True,
+            inference_active=True,
+            inference_phase="INFERENCING",
+        )
+        self.assertEqual(mode["name"], "conflict")
+        self.assertTrue(mode["conflict"])
+
+
+if __name__ == "__main__":
+    unittest.main()
