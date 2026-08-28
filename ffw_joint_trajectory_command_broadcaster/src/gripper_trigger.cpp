@@ -15,6 +15,7 @@
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/joint_state.hpp"
 #include "std_msgs/msg/u_int8.hpp"
+#include "joint_trajectory_command_broadcaster/gripper_edge_gate.hpp"
 
 namespace ffw_gripper_trigger
 {
@@ -49,9 +50,9 @@ public:
       leader_joint_states_topic_, rclcpp::SystemDefaultsQoS(),
       [this](sensor_msgs::msg::JointState::SharedPtr msg) {
         check_joint_edge(
-          *msg, left_gripper_joint_name_, left_below_, left_enable_pub_, "left");
+          *msg, left_gripper_joint_name_, left_edge_gate_, left_enable_pub_, "left");
         check_joint_edge(
-          *msg, right_gripper_joint_name_, right_below_, right_enable_pub_, "right");
+          *msg, right_gripper_joint_name_, right_edge_gate_, right_enable_pub_, "right");
       });
 
     RCLCPP_INFO(get_logger(),
@@ -65,14 +66,14 @@ private:
   void check_joint_edge(
     const sensor_msgs::msg::JointState & msg,
     const std::string & joint_name,
-    bool & below_flag,
+    GripperEdgeGate & edge_gate,
     const rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr & enable_pub,
     const char * tag)
   {
     const size_t n = std::min(msg.name.size(), msg.position.size());
     for (size_t i = 0; i < n; ++i) {
       if (msg.name[i] == joint_name) {
-        check_edge(msg.position[i], below_flag, enable_pub, tag);
+        check_edge(msg.position[i], edge_gate, enable_pub, tag);
         return;
       }
     }
@@ -84,16 +85,27 @@ private:
 
   void check_edge(
     double gripper_pos,
-    bool & below_flag,
+    GripperEdgeGate & edge_gate,
     const rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr & enable_pub,
     const char * tag)
   {
-    if (std::isnan(gripper_pos)) {
+    if (!std::isfinite(gripper_pos)) {
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 2000,
+        "[%s] ignoring non-finite gripper position", tag);
       return;
     }
-    const bool below_now = gripper_pos < gripper_threshold_;
 
-    if (below_now && !below_flag) {
+    const bool was_initialized = edge_gate.initialized();
+    const bool falling_edge = edge_gate.observe(gripper_pos, gripper_threshold_);
+    if (!was_initialized) {
+      RCLCPP_INFO(
+        get_logger(),
+        "[%s] gripper trigger baseline initialized at %.2f; no command published",
+        tag, gripper_pos);
+    }
+
+    if (falling_edge) {
       // Downward edge: publish once
       std_msgs::msg::UInt8 msg;
       msg.data = save_pose_id_;
@@ -102,7 +114,6 @@ private:
         "[%s] Gripper crossed threshold (%.2f < %.2f), published enable=%u",
         tag, gripper_pos, gripper_threshold_, save_pose_id_);
     }
-    below_flag = below_now;
   }
 
   // Params
@@ -115,8 +126,8 @@ private:
   std::string right_enable_topic_;
 
   // Edge state per side
-  bool left_below_ = false;
-  bool right_below_ = false;
+  GripperEdgeGate left_edge_gate_;
+  GripperEdgeGate right_edge_gate_;
 
   // ROS interfaces
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr js_sub_;

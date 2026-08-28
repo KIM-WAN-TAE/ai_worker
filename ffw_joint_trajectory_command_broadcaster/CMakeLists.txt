@@ -69,11 +69,24 @@ pluginlib_export_plugin_description_file(controller_interface joint_trajectory_c
 ################################################################################
 add_executable(gripper_trigger src/gripper_trigger.cpp)
 target_compile_features(gripper_trigger PUBLIC cxx_std_17)
+target_include_directories(gripper_trigger PRIVATE
+  ${PROJECT_SOURCE_DIR}/include
+)
 ament_target_dependencies(gripper_trigger
   rclcpp
   sensor_msgs
   std_msgs
 )
+
+if(BUILD_TESTING)
+  find_package(ament_cmake_gmock REQUIRED)
+  ament_add_gmock(test_gripper_edge_gate
+    test/test_gripper_edge_gate.cpp
+  )
+  target_include_directories(test_gripper_edge_gate PRIVATE
+    ${PROJECT_SOURCE_DIR}/include
+  )
+endif()
 
 ################################################################################
 # Install

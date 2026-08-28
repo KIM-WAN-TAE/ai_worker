@@ -401,7 +401,7 @@ J5~J7에 1.5를 적용한 결과가 이 범위를 벗어나면 broadcaster가 ta
 |---|---|
 | `/foot_switch_node` | 왼쪽 pedal press → left에 4, 오른쪽 pedal press → right에 4 |
 | `/leader/joystick_controller` | middle pedal 없이 짧은 tact release → 해당 side에 2; 양쪽 tact → 양쪽에 2 |
-| `/leader/gripper_trigger` | `/leader/joint_states`의 gripper가 `-0.5` 아래로 내려가는 crossing → 해당 side에 3 |
+| `/leader/gripper_trigger` | 첫 유효 gripper sample은 무명령 baseline; 이후 `/leader/joint_states` 값이 `-0.5` 아래로 내려가는 fresh crossing → 해당 side에 3 |
 
 발행자가 세 개이므로 한 이벤트 직후 다른 이벤트가 들어오면 마지막 메시지가
 모드를 다시 바꿀 수 있다. `UInt8` 메시지에는 발행 원인, sequence, timestamp,

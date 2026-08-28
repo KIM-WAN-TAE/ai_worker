@@ -1,0 +1,619 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>F2 J7 URDF · DXL 범위 불일치</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #18212b;
+      --muted: #637180;
+      --line: #dce4ea;
+      --paper: #ffffff;
+      --canvas: #edf3f6;
+      --dxl: #007f86;
+      --dxl-dark: #005d63;
+      --dxl-soft: #d9f0ef;
+      --loss: #f28c28;
+      --loss-dark: #a44e00;
+      --loss-soft: #fff0db;
+      --danger: #d4472f;
+      --urdf: #3e5265;
+      --steel: #d9e0e5;
+      --steel-dark: #46515d;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 50% -10%, #fff 0 28rem, transparent 47rem),
+        var(--canvas);
+      font-family: Pretendard, "Noto Sans KR", "Apple SD Gothic Neo", Arial, sans-serif;
+      font-variant-numeric: tabular-nums;
+    }
+
+    main {
+      width: min(1460px, calc(100% - 36px));
+      margin: 28px auto;
+    }
+
+    .hero {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      align-items: end;
+      gap: 24px;
+      margin-bottom: 18px;
+    }
+
+    .eyebrow {
+      margin: 0 0 7px;
+      color: var(--dxl-dark);
+      font-size: 13px;
+      font-weight: 850;
+      letter-spacing: .12em;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(30px, 3.1vw, 48px);
+      line-height: 1.08;
+      letter-spacing: -.045em;
+    }
+
+    .subtitle {
+      margin: 10px 0 0;
+      color: var(--muted);
+      font-size: 16px;
+      line-height: 1.5;
+    }
+
+    .view-badge {
+      padding: 10px 14px;
+      border: 1px solid #c9d4dc;
+      border-radius: 999px;
+      background: rgba(255,255,255,.72);
+      color: #40505e;
+      font-size: 13px;
+      font-weight: 800;
+      white-space: nowrap;
+    }
+
+    .cards {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+
+    .hand-card,
+    .cause,
+    .legend-note {
+      border: 1px solid #d8e1e7;
+      background: rgba(255,255,255,.95);
+      box-shadow: 0 12px 36px rgba(30, 52, 67, .07);
+    }
+
+    .hand-card {
+      position: relative;
+      overflow: hidden;
+      border-radius: 22px;
+    }
+
+    .hand-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      padding: 20px 22px 0;
+    }
+
+    .hand-title {
+      display: flex;
+      align-items: baseline;
+      gap: 9px;
+    }
+
+    .hand-title h2 {
+      margin: 0;
+      font-size: 25px;
+      letter-spacing: -.035em;
+    }
+
+    .hand-title span {
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 750;
+    }
+
+    .coverage {
+      display: grid;
+      justify-items: end;
+      line-height: 1;
+    }
+
+    .coverage strong {
+      color: var(--dxl-dark);
+      font-size: 21px;
+    }
+
+    .coverage small {
+      margin-top: 5px;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 750;
+    }
+
+    .diagram {
+      display: block;
+      width: 100%;
+      height: auto;
+      margin: -7px 0 -13px;
+    }
+
+    .ring-bg { fill: none; stroke: #edf1f3; stroke-width: 30; }
+    .ring-urdf { fill: none; stroke: var(--loss); stroke-width: 30; stroke-linecap: butt; }
+    .ring-dxl { fill: none; stroke: var(--dxl); stroke-width: 30; stroke-linecap: butt; }
+    .ring-outline { fill: none; stroke: var(--urdf); stroke-width: 2; stroke-dasharray: 4 5; opacity: .8; }
+    .zero-axis { stroke: #aebbc4; stroke-width: 2; stroke-dasharray: 5 5; }
+    .pivot { fill: #fff; stroke: #25323d; stroke-width: 5; }
+    .arc-label { fill: var(--muted); font-size: 12px; font-weight: 750; letter-spacing: .03em; }
+    .loss-label { fill: var(--loss-dark); font-size: 15px; font-weight: 900; }
+    .range-main { fill: var(--ink); font-size: 29px; font-weight: 900; letter-spacing: -.03em; }
+    .range-sub { fill: var(--muted); font-size: 12px; font-weight: 700; }
+    .dir-arrow { fill: none; stroke: #8c9aa5; stroke-width: 2; }
+
+    .grip-arm { fill: #313a43; }
+    .grip-arm-hi { fill: #596570; }
+    .grip-shell { fill: #f1f4f6; stroke: #788691; stroke-width: 2; }
+    .grip-joint { fill: #d8dfe4; stroke: #65727c; stroke-width: 2; }
+    .grip-finger { fill: #f7f8f9; stroke: #697780; stroke-width: 2; }
+    .grip-pad { fill: #b8c3ca; }
+    .grip-camera { fill: #1e2831; stroke: #71808a; stroke-width: 2; }
+    .grip-lens { fill: #73c9d2; stroke: #0b5860; stroke-width: 2; }
+
+    .loss-chips {
+      display: flex;
+      justify-content: center;
+      gap: 8px;
+      margin: -2px 18px 14px;
+    }
+
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      min-height: 34px;
+      padding: 6px 11px;
+      border: 1px solid #f2c28c;
+      border-radius: 10px;
+      background: var(--loss-soft);
+      color: #773900;
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .chip strong { font-size: 16px; color: var(--loss-dark); }
+    .chip.critical { border-color: #e9a595; background: #fff0ed; color: #822b1c; }
+    .chip.critical strong { color: var(--danger); }
+
+    .range-table {
+      margin: 0 20px 20px;
+      padding-top: 15px;
+      border-top: 1px solid var(--line);
+    }
+
+    .ruler {
+      position: relative;
+      height: 10px;
+      margin: 0 0 9px 70px;
+      border-radius: 999px;
+      background: #e9eef1;
+    }
+
+    .ruler::after {
+      content: "0°";
+      position: absolute;
+      left: 50%;
+      top: -19px;
+      transform: translateX(-50%);
+      color: #8996a0;
+      font-size: 10px;
+      font-weight: 800;
+    }
+
+    .ruler .urdf-band,
+    .ruler .dxl-band {
+      position: absolute;
+      top: 0;
+      height: 100%;
+    }
+
+    .ruler .urdf-band {
+      left: var(--u1);
+      right: calc(100% - var(--u2));
+      border-radius: 999px;
+      background: var(--loss);
+    }
+
+    .ruler .dxl-band {
+      left: var(--d1);
+      right: calc(100% - var(--d2));
+      border-radius: 999px;
+      background: var(--dxl);
+      box-shadow: inset 0 0 0 1px rgba(0,0,0,.08);
+    }
+
+    .range-row {
+      display: grid;
+      grid-template-columns: 62px 1fr;
+      gap: 8px;
+      align-items: start;
+      padding: 8px 0;
+    }
+
+    .range-row + .range-row { border-top: 1px solid #edf1f3; }
+
+    .row-name {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding-top: 2px;
+      color: #34414c;
+      font-size: 12px;
+      font-weight: 900;
+    }
+
+    .swatch {
+      width: 10px;
+      height: 10px;
+      border-radius: 3px;
+      background: var(--urdf);
+    }
+
+    .swatch.dxl { background: var(--dxl); }
+
+    .values strong {
+      display: block;
+      font-size: 18px;
+      letter-spacing: -.015em;
+    }
+
+    .values small {
+      display: block;
+      margin-top: 4px;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.45;
+    }
+
+    .cause {
+      margin-top: 16px;
+      padding: 19px 21px 18px;
+      border-radius: 20px;
+    }
+
+    .cause h2 {
+      margin: 0 0 14px;
+      font-size: 18px;
+      letter-spacing: -.025em;
+    }
+
+    .flow {
+      display: grid;
+      grid-template-columns: 1fr auto 1.18fr auto 1.1fr auto 1.15fr;
+      align-items: stretch;
+      gap: 10px;
+    }
+
+    .flow-step {
+      min-height: 90px;
+      padding: 12px 13px;
+      border: 1px solid #dbe3e8;
+      border-radius: 13px;
+      background: #f8fafb;
+    }
+
+    .flow-step.problem { border-color: #efbf87; background: #fff8ef; }
+    .flow-step.result { border-color: #9fcfd0; background: #f0f9f8; }
+
+    .step-no {
+      display: block;
+      margin-bottom: 7px;
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 900;
+      letter-spacing: .08em;
+    }
+
+    .flow-step strong {
+      display: block;
+      font-size: 15px;
+      line-height: 1.3;
+    }
+
+    .flow-step p {
+      margin: 5px 0 0;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.45;
+    }
+
+    .flow-step.problem strong { color: var(--loss-dark); }
+    .flow-step.result strong { color: var(--dxl-dark); }
+
+    .flow-arrow {
+      display: grid;
+      place-items: center;
+      color: #91a0ab;
+      font-size: 23px;
+      font-weight: 400;
+    }
+
+    .legend-note {
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      gap: 18px;
+      align-items: center;
+      margin-top: 12px;
+      padding: 13px 16px;
+      border-radius: 14px;
+      box-shadow: none;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.5;
+    }
+
+    .legend {
+      display: flex;
+      gap: 14px;
+      color: #4d5b67;
+      font-weight: 800;
+      white-space: nowrap;
+    }
+
+    .legend span { display: inline-flex; align-items: center; gap: 6px; }
+    .dot { width: 11px; height: 11px; border-radius: 3px; background: var(--dxl); }
+    .dot.loss { background: var(--loss); }
+
+    .safety {
+      color: #6d400c;
+      font-weight: 800;
+      text-align: right;
+      white-space: nowrap;
+    }
+
+    @media (max-width: 980px) {
+      main { width: min(720px, calc(100% - 24px)); margin: 18px auto; }
+      .hero { grid-template-columns: 1fr; gap: 12px; }
+      .view-badge { justify-self: start; }
+      .cards { grid-template-columns: 1fr; }
+      .flow { grid-template-columns: 1fr; }
+      .flow-arrow { transform: rotate(90deg); min-height: 12px; }
+      .legend-note { grid-template-columns: 1fr; }
+      .safety { text-align: left; white-space: normal; }
+    }
+
+    @media print {
+      @page { size: A3 landscape; margin: 11mm; }
+      body { background: #fff; }
+      main { width: 100%; margin: 0; }
+      .hand-card, .cause, .legend-note { box-shadow: none; break-inside: avoid; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header class="hero">
+    <div>
+      <p class="eyebrow">AI WORKER · F2 FOLLOWER · J7</p>
+      <h1>URDF는 허용하지만, 현재 DXL은 막는다</h1>
+      <p class="subtitle">양쪽 모두 가동 폭이 줄었고, 좌우 mirror 복사 오류 때문에 오른손 +방향 손실이 특히 크다.</p>
+    </div>
+    <div class="view-badge">HEAD CAM VIEW&nbsp; · &nbsp;왼손 ← 화면 → 오른손</div>
+  </header>
+
+  <section class="cards" aria-label="좌우 J7 범위 비교">
+    <article class="hand-card">
+      <div class="hand-head">
+        <div class="hand-title">
+          <h2>왼손 J7</h2>
+          <span>arm_l_joint7 · DXL ID 37</span>
+        </div>
+        <div class="coverage"><strong>86.3%</strong><small>URDF 폭 중 현재 DXL 범위</small></div>
+      </div>
+
+      <svg class="diagram" viewBox="0 0 600 430" role="img" aria-label="왼손 J7 URDF와 DXL 각도 범위">
+        <defs>
+          <marker id="arrow-l" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+            <path d="M0,0 L0,6 L7,3 z" fill="#8c9aa5"/>
+          </marker>
+          <filter id="soft-shadow-l" x="-30%" y="-30%" width="160%" height="160%">
+            <feDropShadow dx="0" dy="5" stdDeviation="6" flood-color="#24303a" flood-opacity=".18"/>
+          </filter>
+        </defs>
+
+        <circle class="ring-bg" cx="300" cy="219" r="154"/>
+        <circle class="ring-urdf" cx="300" cy="219" r="154" pathLength="360"
+                stroke-dasharray="194.834 165.166" transform="rotate(-104.284 300 219)"/>
+        <circle class="ring-dxl" cx="300" cy="219" r="154" pathLength="360"
+                stroke-dasharray="168.148 191.852" transform="rotate(-90 300 219)"/>
+        <circle class="ring-outline" cx="300" cy="219" r="171" pathLength="360"
+                stroke-dasharray="194.834 165.166" transform="rotate(-104.284 300 219)"/>
+
+        <line class="zero-axis" x1="300" y1="219" x2="493" y2="219"/>
+        <text class="arc-label" x="497" y="224">0°</text>
+        <path class="dir-arrow" d="M 420 125 A 150 150 0 0 1 452 168" marker-end="url(#arrow-l)"/>
+        <text class="arc-label" x="438" y="119">+ θ</text>
+        <text class="loss-label" x="158" y="92">14.28°</text>
+        <text class="loss-label" x="386" y="359">12.40°</text>
+
+        <g transform="translate(300 219)" filter="url(#soft-shadow-l)" aria-label="HX2-D1 계열 그리퍼 실루엣">
+          <path class="grip-arm" d="M-176,-25 H-56 L-38,-35 H-8 V35 H-38 L-56,25 H-176 Z"/>
+          <path class="grip-arm-hi" d="M-170,-19 H-61 L-45,-27 H-15 V-15 H-170 Z"/>
+          <rect class="grip-camera" x="-58" y="-48" width="52" height="22" rx="7"/>
+          <circle class="grip-lens" cx="-21" cy="-37" r="7"/>
+          <path class="grip-shell" d="M-10,-43 H51 Q67,-43 74,-29 L82,-12 V12 L74,29 Q67,43 51,43 H-10 Z"/>
+          <ellipse class="grip-joint" cx="42" cy="0" rx="26" ry="29"/>
+          <circle class="pivot" cx="0" cy="0" r="8"/>
+          <path class="grip-finger" d="M63,-30 L106,-38 L146,-28 L158,-16 L151,-7 L112,-14 L83,-5 Z"/>
+          <path class="grip-finger" d="M63,30 L106,38 L146,28 L158,16 L151,7 L112,14 L83,5 Z"/>
+          <path class="grip-pad" d="M112,-20 L145,-17 L149,-12 L116,-10 Z"/>
+          <path class="grip-pad" d="M112,20 L145,17 L149,12 L116,10 Z"/>
+        </g>
+
+        <text class="range-main" x="300" y="406" text-anchor="middle">DXL 밖 26.69°</text>
+        <text class="range-sub" x="300" y="424" text-anchor="middle">URDF 전체 폭 194.83° − 현재 도달 폭 168.15°</text>
+      </svg>
+
+      <div class="loss-chips" aria-label="왼손 부족 범위">
+        <div class="chip">− 방향 부족 <strong>14.28°</strong></div>
+        <div class="chip">+ 방향 부족 <strong>12.40°</strong></div>
+      </div>
+
+      <div class="range-table">
+        <div class="ruler" style="--u1:2.598%;--u2:91.159%;--d1:9.091%;--d2:85.522%;">
+          <span class="urdf-band"></span><span class="dxl-band"></span>
+        </div>
+        <div class="range-row">
+          <div class="row-name"><span class="swatch"></span>URDF</div>
+          <div class="values">
+            <strong>−104.28° ↔ +90.55°</strong>
+            <small>−1.8201 ↔ +1.5804 rad · PH42 등가 경계 −175980 ↔ +152804 tick (미적용)</small>
+          </div>
+        </div>
+        <div class="range-row">
+          <div class="row-name"><span class="swatch dxl"></span>현재 DXL</div>
+          <div class="values">
+            <strong>−90.00° ↔ +78.15°</strong>
+            <small>−1.570796 ↔ +1.363942 rad · −151875 ↔ +131875 tick</small>
+          </div>
+        </div>
+      </div>
+    </article>
+
+    <article class="hand-card">
+      <div class="hand-head">
+        <div class="hand-title">
+          <h2>오른손 J7</h2>
+          <span>arm_r_joint7 · DXL ID 7</span>
+        </div>
+        <div class="coverage"><strong>86.3%</strong><small>URDF 폭 중 현재 DXL 범위</small></div>
+      </div>
+
+      <svg class="diagram" viewBox="0 0 600 430" role="img" aria-label="오른손 J7 URDF와 DXL 각도 범위">
+        <defs>
+          <marker id="arrow-r" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+            <path d="M0,0 L0,6 L7,3 z" fill="#8c9aa5"/>
+          </marker>
+          <filter id="soft-shadow-r" x="-30%" y="-30%" width="160%" height="160%">
+            <feDropShadow dx="0" dy="5" stdDeviation="6" flood-color="#24303a" flood-opacity=".18"/>
+          </filter>
+        </defs>
+        <circle class="ring-bg" cx="300" cy="219" r="154"/>
+        <circle class="ring-urdf" cx="300" cy="219" r="154" pathLength="360"
+                stroke-dasharray="194.834 165.166" transform="rotate(75.716 300 219)"/>
+        <circle class="ring-dxl" cx="300" cy="219" r="154" pathLength="360"
+                stroke-dasharray="168.148 191.852" transform="rotate(101.852 300 219)"/>
+        <circle class="ring-outline" cx="300" cy="219" r="171" pathLength="360"
+                stroke-dasharray="194.834 165.166" transform="rotate(75.716 300 219)"/>
+
+        <line class="zero-axis" x1="300" y1="219" x2="107" y2="219"/>
+        <text class="arc-label" x="86" y="224">0°</text>
+        <path class="dir-arrow" d="M 180 125 A 150 150 0 0 0 148 168" marker-end="url(#arrow-r)"/>
+        <text class="arc-label" x="139" y="119">+ θ</text>
+        <path d="M225 88 L294 67" fill="none" stroke="#a44e00" stroke-width="1.5"/>
+        <text class="loss-label" x="172" y="91">0.55°</text>
+        <text class="loss-label" x="300" y="373" text-anchor="middle">26.14°</text>
+
+        <g transform="translate(300 219) scale(-1 1)" filter="url(#soft-shadow-r)" aria-label="HX2-D1 계열 그리퍼 실루엣">
+          <path class="grip-arm" d="M-176,-25 H-56 L-38,-35 H-8 V35 H-38 L-56,25 H-176 Z"/>
+          <path class="grip-arm-hi" d="M-170,-19 H-61 L-45,-27 H-15 V-15 H-170 Z"/>
+          <rect class="grip-camera" x="-58" y="-48" width="52" height="22" rx="7"/>
+          <circle class="grip-lens" cx="-21" cy="-37" r="7"/>
+          <path class="grip-shell" d="M-10,-43 H51 Q67,-43 74,-29 L82,-12 V12 L74,29 Q67,43 51,43 H-10 Z"/>
+          <ellipse class="grip-joint" cx="42" cy="0" rx="26" ry="29"/>
+          <circle class="pivot" cx="0" cy="0" r="8"/>
+          <path class="grip-finger" d="M63,-30 L106,-38 L146,-28 L158,-16 L151,-7 L112,-14 L83,-5 Z"/>
+          <path class="grip-finger" d="M63,30 L106,38 L146,28 L158,16 L151,7 L112,14 L83,5 Z"/>
+          <path class="grip-pad" d="M112,-20 L145,-17 L149,-12 L116,-10 Z"/>
+          <path class="grip-pad" d="M112,20 L145,17 L149,12 L116,10 Z"/>
+        </g>
+
+        <text class="range-main" x="300" y="406" text-anchor="middle">DXL 밖 26.69°</text>
+        <text class="range-sub" x="300" y="424" text-anchor="middle">오른손은 손실 대부분이 +방향에 몰림</text>
+      </svg>
+
+      <div class="loss-chips" aria-label="오른손 부족 범위">
+        <div class="chip">− 방향 부족 <strong>0.55°</strong></div>
+        <div class="chip critical">+ 방향 부족 <strong>26.14°</strong></div>
+      </div>
+
+      <div class="range-table">
+        <div class="ruler" style="--u1:8.841%;--u2:97.402%;--d1:9.091%;--d2:85.522%;">
+          <span class="urdf-band"></span><span class="dxl-band"></span>
+        </div>
+        <div class="range-row">
+          <div class="row-name"><span class="swatch"></span>URDF</div>
+          <div class="values">
+            <strong>−90.55° ↔ +104.28°</strong>
+            <small>−1.5804 ↔ +1.8201 rad · PH42 등가 경계 −152804 ↔ +175980 tick (미적용)</small>
+          </div>
+        </div>
+        <div class="range-row">
+          <div class="row-name"><span class="swatch dxl"></span>현재 DXL</div>
+          <div class="values">
+            <strong>−90.00° ↔ +78.15°</strong>
+            <small>−1.570796 ↔ +1.363942 rad · −151875 ↔ +131875 tick</small>
+          </div>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <section class="cause" aria-label="오류 발생 흐름">
+    <h2>두 문제가 겹친 과정</h2>
+    <div class="flow">
+      <div class="flow-step">
+        <span class="step-no">SOURCE</span>
+        <strong>왼손 URDF 비대칭 범위</strong>
+        <p>−104.28° ↔ +90.55°</p>
+      </div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step problem">
+        <span class="step-no">문제 1 · 환산계수</span>
+        <strong>Y 계열 524288 tick/rev 사용</strong>
+        <p>실제 J7은 P 계열 PH42: 607500 tick/rev · 각도 폭 13.697% 축소</p>
+      </div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step problem">
+        <span class="step-no">문제 2 · MIRROR 복사</span>
+        <strong>왼손 raw 값을 오른손에도 복사</strong>
+        <p>양쪽 모두 −151875 ↔ +131875 tick</p>
+      </div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step result">
+        <span class="step-no">현재 PH42 해석</span>
+        <strong>양쪽 모두 −90.00° ↔ +78.15°</strong>
+        <p>오른손 URDF +104.28° 명령은 +26.14°만큼 DXL hard max를 넘어감</p>
+      </div>
+    </div>
+  </section>
+
+  <footer class="legend-note">
+    <div class="legend">
+      <span><i class="dot"></i>현재 DXL 도달 범위</span>
+      <span><i class="dot loss"></i>URDF 허용 · DXL 차단 범위</span>
+    </div>
+    <div>
+      각도는 degree를 주 단위로 표시하고 rad와 raw tick을 병기했다. PH42 환산은 1 tick = 0.000010342691864 rad = 0.000592593°이다.
+      그리퍼 실루엣은 F2의 HX2-D1 메시/헤드캠 외형을 단순화한 방향 도식이다.
+      근거: <b>J7_URDF_TO_DXL_TICK_CALCULATION.md</b>, <b>J7_Y_SERIES_SIMILARITY_CAUSE_IMPACT_TEST.md</b>.
+    </div>
+    <div class="safety">분석 시각화 · 설정 변경/가동 승인 아님</div>
+  </footer>
+</main>
+</body>
+</html>

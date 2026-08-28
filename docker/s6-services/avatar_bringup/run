@@ -11,11 +11,10 @@ if [ -f "${LEADER_TYPE_FILE}" ]; then
     LEADER_TYPE=$(tr -d '[:space:]' < "${LEADER_TYPE_FILE}" | tr '[:upper:]' '[:lower:]')
 fi
 if [ "${LEADER_TYPE}" = "a3" ]; then
-    # The A3 gripper trigger currently treats an already-closed gripper as a
-    # fresh falling edge on startup and immediately commands save pose 3.
-    # Keep that shortcut disabled for UI-managed operation; the web recovery
-    # flow provides the explicit, interlocked init-pose action instead.
-    ROS2_COMMAND="ros2 launch ffw_bringup ffw_a3_ai.launch.py launch_gripper_trigger:=false"
+    # The trigger establishes a no-command baseline from the first valid
+    # gripper sample, then requires a fresh above-to-below threshold crossing.
+    # This keeps the save-pose shortcut without the former startup edge.
+    ROS2_COMMAND="ros2 launch ffw_bringup ffw_a3_ai.launch.py launch_gripper_trigger:=true"
 elif [ "${LEADER_TYPE}" = "a2" ]; then
     ROS2_COMMAND="ros2 launch ffw_bringup ffw_a2_ai.launch.py"
 elif [ "${LEADER_TYPE}" = "lg2" ]; then
