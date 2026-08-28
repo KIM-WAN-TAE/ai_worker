@@ -1,0 +1,23 @@
+# Interactive shortcuts for the robot-side AI Worker container.
+# Keep this file mounted from docker-compose so operator shortcuts survive a
+# container recreation. F1/F2 compatibility names intentionally point at the
+# unprefixed launch filenames used by this branch.
+alias cb='colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release'
+alias ffw_a3_leader='ros2 launch ffw_bringup ffw_a3_ai.launch.py launch_gripper_trigger:=true'
+alias ffw_lg2_leader_ai='ros2 launch ffw_bringup ffw_lg2_leader_ai.launch.py'
+alias ffw_bg2_follower_ai='ros2 launch ffw_bringup ffw_bg2_follower_ai.launch.py'
+alias ffw_sg2_follower_ai='ros2 launch ffw_bringup ffw_sg2_follower_ai.launch.py'
+alias ffw_bg2_ai='ros2 launch ffw_bringup ffw_bg2_ai.launch.py'
+alias ffw_sg2_ai='ros2 launch ffw_bringup ffw_sg2_ai.launch.py'
+alias ffw_sh5_follower_ai='ros2 launch ffw_bringup ffw_sh5_follower_ai.launch.py'
+alias ffw_bh5_follower_ai='ros2 launch ffw_bringup ffw_bh5_follower_ai.launch.py'
+alias ffw_f2_follower='ros2 launch ffw_bringup f2_follower_ai.launch.py'
+alias ffw_f2_follower_ai='ros2 launch ffw_bringup f2_follower_ai.launch.py'
+alias ffw_f1_follower_ai='ros2 launch ffw_bringup f1_follower_ai.launch.py'
+alias ffw_f2_ai='ros2 launch ffw_bringup f2_ai.launch.py'
+alias ffw_f1_ai='ros2 launch ffw_bringup f1_ai.launch.py'
+alias ffw_f2_bring_down='ros2 launch ffw_bringup f2_bring_down.launch.py'
+alias f2_bring_down='ros2 launch ffw_bringup f2_bring_down.launch.py'
+alias motion_controller='ros2 launch cyclo_motion_controller_ros ai_worker_controller.launch.py'
+alias motion_controller_hand='ros2 launch cyclo_motion_controller_ros ai_worker_controller.launch.py controller_type:=vr hand:=true'
+alias zenohd='ros2 run rmw_zenoh_cpp rmw_zenohd'

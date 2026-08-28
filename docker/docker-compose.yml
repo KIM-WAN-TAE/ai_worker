@@ -37,6 +37,7 @@ services:
       - /tmp/.docker.xauth:/tmp/.docker.xauth:rw
       - ./workspace:/workspace
       - ../:/root/ros2_ws/src/ai_worker/
+      - ./bash_aliases:/root/.bash_aliases:ro
       # Cyclo status message types used by the intervention safety monitor.
       # The web-control runner builds this read-only source into its own
       # overlay; it does not modify the robot controller workspace install.
