@@ -331,6 +331,15 @@ def generate_launch_description():
         condition=IfCondition(use_head_eef_tracker),
     )
 
+    # Sole publisher to the final F2 arm-controller input topics. Policy and
+    # A3 streams stay isolated until one source is selected explicitly.
+    command_source_arbiter_node = Node(
+        package='ffw_bringup',
+        executable='command_source_arbiter',
+        name='command_source_arbiter',
+        output='screen',
+    )
+
     dual_laser_merger_node = Node(
         package='dual_laser_merger',
         executable='dual_laser_merger_node',
@@ -373,6 +382,7 @@ def generate_launch_description():
             lidar_timer_20s,
             lidar_timer_10s,
             head_eef_tracker_node,
+            command_source_arbiter_node,
             dual_laser_merger_node,
         ]
     )

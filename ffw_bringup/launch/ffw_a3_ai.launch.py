@@ -32,6 +32,16 @@ def generate_launch_description():
             description='URDF/XACRO file for the robot model.',
         ),
         DeclareLaunchArgument(
+            'left_trajectory_output_topic',
+            default_value='joint_trajectory_command_broadcaster_left/joint_trajectory',
+            description='Left leader output; command arbitration may route it as teleop.',
+        ),
+        DeclareLaunchArgument(
+            'right_trajectory_output_topic',
+            default_value='joint_trajectory_command_broadcaster_right/joint_trajectory',
+            description='Right leader output; command arbitration may route it as teleop.',
+        ),
+        DeclareLaunchArgument(
             'use_mock_hardware',
             default_value='false',
             description='Use mock hardware mirroring command.',
@@ -54,6 +64,8 @@ def generate_launch_description():
     ]
 
     description_file = LaunchConfiguration('description_file')
+    left_trajectory_output_topic = LaunchConfiguration('left_trajectory_output_topic')
+    right_trajectory_output_topic = LaunchConfiguration('right_trajectory_output_topic')
     use_mock_hardware = LaunchConfiguration('use_mock_hardware')
     port_name = LaunchConfiguration('port_name')
     launch_foot_switch = LaunchConfiguration('launch_foot_switch')
@@ -74,6 +86,16 @@ def generate_launch_description():
         package='controller_manager',
         executable='ros2_control_node',
         parameters=[robot_controllers],
+        remappings=[
+            (
+                'joint_trajectory_command_broadcaster_left/joint_trajectory',
+                left_trajectory_output_topic,
+            ),
+            (
+                'joint_trajectory_command_broadcaster_right/joint_trajectory',
+                right_trajectory_output_topic,
+            ),
+        ],
         output='both',
     )
 

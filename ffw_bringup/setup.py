@@ -67,6 +67,7 @@ setup(
             'joint_trajectory_executor = ffw_bringup.joint_trajectory_executor:main',
             'head_eef_tracker = ffw_bringup.head_eef_tracker:main',
             'foot_switch_node = ffw_bringup.foot_switch:main',
+            'command_source_arbiter = ffw_bringup.command_source_arbiter:main',
         ],
     },
 )

@@ -16,6 +16,8 @@
   <author email="ywh@robotis.com">Wonho Yun</author>
   <depend>rclpy</depend>
   <depend>std_msgs</depend>
+  <depend>std_srvs</depend>
+  <depend>trajectory_msgs</depend>
   <depend>dynamixel_hardware_interface</depend>
   <depend>ros_gz_bridge</depend>
   <depend>ros_gz_sim</depend>
