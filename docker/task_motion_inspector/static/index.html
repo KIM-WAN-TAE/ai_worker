@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Motion Inspector</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">R</span>
+      <div>
+        <strong>Motion Inspector</strong>
+        <small>Command → actuator tracking</small>
+      </div>
+    </div>
+    <div class="header-status">
+      <span id="sourceMode" class="badge neutral">SOURCE · UNKNOWN</span>
+      <span id="modeText" class="badge offline">CONNECTING</span>
+    </div>
+  </header>
+
+  <main class="page">
+    <section class="summary-grid" aria-label="운영 요약">
+      <article class="summary-card">
+        <span>Command source</span>
+        <strong id="summarySource">—</strong>
+        <small id="sourceDetail">상태 대기 중</small>
+      </article>
+      <article class="summary-card">
+        <span>Max tracking error</span>
+        <strong id="summaryError">—</strong>
+        <small id="errorThreshold">경고 기준 —</small>
+      </article>
+      <article class="summary-card">
+        <span>Active alerts</span>
+        <strong id="summaryAlerts">0</strong>
+        <small id="alertDetail">정상</small>
+      </article>
+      <article class="summary-card">
+        <span>DXL health</span>
+        <strong id="summaryDxl">—</strong>
+        <small id="configDigest">설정 대기 중</small>
+      </article>
+    </section>
+
+    <section class="panel control-panel">
+      <div class="panel-heading compact">
+        <div>
+          <h2>Session</h2>
+          <p>측정 구간을 rosbag과 정량 리포트로 저장합니다.</p>
+        </div>
+        <span id="recordState" class="dot-label"><i></i>Idle</span>
+      </div>
+      <div class="control-row">
+        <label class="field grow">
+          <span>Session name</span>
+          <input id="sessionName" value="tracking_test" autocomplete="off">
+        </label>
+        <button id="recordStart" class="button primary">Record</button>
+        <button id="recordStop" class="button danger" disabled>Stop</button>
+        <label class="field session-field">
+          <span>Saved session</span>
+          <select id="sessionSelect"><option value="">선택</option></select>
+        </label>
+        <button id="reportLink" class="button ghost" disabled>Analyze</button>
+      </div>
+
+    </section>
+
+    <section class="workspace-grid">
+      <article class="panel joint-panel">
+        <div class="panel-heading">
+          <div>
+            <h2>Joint tracking</h2>
+            <p>명령과 실제 관절 응답을 실시간 비교합니다.</p>
+          </div>
+          <div class="segmented" id="sideFilter" aria-label="joint filter">
+            <button class="active" data-filter="all">All</button>
+            <button data-filter="left">Left</button>
+            <button data-filter="right">Right</button>
+            <button data-filter="j7">J7</button>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Joint</th><th>Command</th><th>Reference</th><th>Actual</th><th>Error</th><th>State</th></tr>
+            </thead>
+            <tbody id="jointRows"><tr><td colspan="6" class="empty">신호 대기 중</td></tr></tbody>
+          </table>
+        </div>
+      </article>
+
+      <article class="panel detail-panel">
+        <div class="panel-heading">
+          <div>
+            <h2 id="selectedTitle">ARM_L_JOINT1</h2>
+            <p id="selectedSource">비교 기준 신호 대기 중</p>
+          </div>
+          <span id="selectedState" class="state-pill normal">NORMAL</span>
+        </div>
+
+        <div class="chart-heading">
+          <span>Position</span><strong id="selectedError">—</strong>
+        </div>
+        <canvas id="positionChart" height="220"></canvas>
+        <div class="legend" id="positionLegend">
+          <span data-series="source"><i class="source"></i>Leader target</span>
+          <span data-series="policy"><i class="policy"></i>Policy preview</span>
+          <span data-series="command"><i class="command"></i>Final trajectory</span>
+          <span data-series="reference"><i class="reference"></i>Controller ref</span>
+          <span data-series="feedback"><i class="feedback"></i>Feedback</span>
+          <span data-series="dxl_present"><i class="dxl"></i>DXL present</span>
+        </div>
+
+        <div class="chart-heading error-heading"><span>Tracking error</span><small id="historyWindow">최근 60 s</small></div>
+        <canvas id="errorChart" height="120"></canvas>
+
+        <div class="detail-stats">
+          <div><span>DXL current</span><strong id="selectedCurrent">—</strong></div>
+          <div><span>Configured range</span><strong id="selectedRange">—</strong></div>
+          <div><span>Model / limit source</span><strong id="limitSource">—</strong></div>
+        </div>
+        <div id="limitVisual" class="limit-visual"><span class="range-fill"></span><i class="position-marker"></i></div>
+      </article>
+    </section>
+
+    <section class="bottom-grid">
+      <article class="panel events-panel">
+        <div class="panel-heading compact">
+          <div><h2>Events</h2><p>상태 변화와 경보만 표시합니다.</p></div>
+          <button id="clearEvents" class="text-button">Clear</button>
+        </div>
+        <div id="events" class="event-list"><div class="empty">이벤트 없음</div></div>
+      </article>
+
+      <article class="panel diagnostics-panel">
+        <details>
+          <summary>Signal diagnostics <span id="topicSummary">대기 중</span></summary>
+          <div id="topicList" class="topic-list"></div>
+        </details>
+      </article>
+    </section>
+  </main>
+
+  <div id="toast" class="toast" role="status"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

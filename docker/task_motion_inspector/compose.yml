@@ -11,10 +11,8 @@ services:
       ROS_DOMAIN_ID: "30"
       RMW_IMPLEMENTATION: "rmw_zenoh_cpp"
       MOTION_INSPECTOR_PORT: "8765"
-      ENABLE_PHYSICAL_REPLAY: "${ENABLE_PHYSICAL_REPLAY:-false}"
       TRACKING_WARN_DEG: "2.0"
-      TRACKING_ABORT_DEG: "8.0"
-      START_TOLERANCE_DEG: "5.0"
+      TRACKING_CRITICAL_DEG: "8.0"
     volumes:
       - ../workspace:/workspace
       - ../../:/root/ros2_ws/src/ai_worker:ro
