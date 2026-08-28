@@ -15,10 +15,18 @@ services:
     environment:
      - DISPLAY=${DISPLAY}
      - QT_X11_NO_MITSHM=1
+     # Keep all AI Worker ROS processes on the same graph as Cyclo and the
+     # always-on Intervention controller, including after container recreation.
+     - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-30}
+     - RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}
+     - ZENOH_CONFIG_OVERRIDE=${ZENOH_CONFIG_OVERRIDE:-transport/shared_memory/enabled=false}
      - ENABLE_BRINGUP_CONTROL=${ENABLE_BRINGUP_CONTROL:-false}
      - BRINGUP_CONTROL_TOKEN=${BRINGUP_CONTROL_TOKEN:-}
      - BRINGUP_CONTROL_HOST=${BRINGUP_CONTROL_HOST:-0.0.0.0}
      - BRINGUP_CONTROL_PORT=${BRINGUP_CONTROL_PORT:-8780}
+     - INTERVENTION_CONTROL_HOST=${INTERVENTION_CONTROL_HOST:-127.0.0.1}
+     - INTERVENTION_CONTROL_PORT=${INTERVENTION_CONTROL_PORT:-8779}
+     - INTERVENTION_CONTROL_TOKEN=${INTERVENTION_CONTROL_TOKEN:-}
      - AI_WORKER_ESTOP_TOPIC=${AI_WORKER_ESTOP_TOPIC:-}
     volumes:
       - /dev:/dev
@@ -29,7 +37,15 @@ services:
       - /tmp/.docker.xauth:/tmp/.docker.xauth:rw
       - ./workspace:/workspace
       - ../:/root/ros2_ws/src/ai_worker/
+      # Cyclo status message types used by the intervention safety monitor.
+      # The web-control runner builds this read-only source into its own
+      # overlay; it does not modify the robot controller workspace install.
+      - ../../cyclo_intelligence/interfaces:/opt/cyclo_interfaces_src:ro
       - ./bringup_control_ui/ai_worker_control:/usr/local/bin/ai_worker_control:ro
+      # Register the always-on controller even when iterating with the current
+      # prebuilt image; s6 compiles these mounts during container init.
+      - ./s6-services/intervention_controller:/etc/s6-overlay/s6-rc.d/intervention_controller:ro
+      - ./s6-services/user/contents.d/intervention_controller:/etc/s6-overlay/s6-rc.d/user/contents.d/intervention_controller:ro
       - ./s6-services/ai_worker_bringup/run:/etc/s6-overlay/s6-rc.d/ai_worker_bringup/run:ro
       - ./s6-services/avatar_bringup/run:/etc/s6-overlay/s6-rc.d/avatar_bringup/run:ro
       - ./s6-services/common/ros2_service_run.sh:/usr/local/lib/s6-services/ros2_service_run.sh:ro

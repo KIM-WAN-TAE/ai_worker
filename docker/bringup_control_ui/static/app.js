@@ -111,9 +111,10 @@ function renderMode() {
     const previousMode = lastObservedMode;
     const visiblePage = document.querySelector(".app-page.active")?.dataset.pageContent;
     if (mode.name === "teleop" || mode.name === "inference") setPage(mode.name);
+    if (mode.name === "intervention") setPage("inference");
     if (mode.name === "conflict") setPage("system");
     if (mode.name === "idle" && (
-      ["teleop", "inference", "conflict"].includes(previousMode)
+      ["teleop", "inference", "intervention", "conflict"].includes(previousMode)
       || (previousMode === null && ["teleop", "inference"].includes(visiblePage))
     )) setPage("home");
     lastObservedMode = mode.name;
@@ -127,18 +128,19 @@ function renderMode() {
   $("home-mode-label").textContent = mode.label;
 
   const leaderUp = state.safety.leader_runtime_active;
+  const intervention = state.intervention?.current;
   const teleopBadge = $("teleop-page-badge");
-  teleopBadge.textContent = mode.name === "conflict" ? "CONFLICT" : leaderUp ? "ACTIVE" : "OFF";
+  teleopBadge.textContent = mode.name === "conflict" ? "CONFLICT" : mode.name === "intervention" ? "HAND-OFF" : leaderUp ? "ACTIVE" : "OFF";
   teleopBadge.className = `mode-page-badge ${leaderUp ? "active teleop" : ""}`;
   $("teleop-stage-title").textContent = mode.name === "conflict" ? "Command 충돌 감지" : leaderUp ? "Teleop 활성" : "Teleop 대기";
 
   const inference = state.ros.inference;
   const inferenceBadge = $("inference-page-badge");
   const phase = inference.phase || "UNAVAILABLE";
-  inferenceBadge.textContent = inference.present ? phase : "DISCONNECTED";
+  inferenceBadge.textContent = intervention ? "INTERVENTION" : inference.present ? phase : "DISCONNECTED";
   inferenceBadge.className = `mode-page-badge ${inference.present ? "active inference" : ""}`;
-  $("inference-stage-title").textContent = mode.name === "conflict" ? "Runtime 충돌 감지" : inference.present ? `${phase}` : "Inference 대기";
-  $("inference-phase-large").textContent = inference.present ? phase : "DISCONNECTED";
+  $("inference-stage-title").textContent = mode.name === "conflict" ? "Runtime 충돌 감지" : intervention ? `사람 조작 · ${intervention.phase}` : inference.present ? `${phase}` : "Inference 대기";
+  $("inference-phase-large").textContent = intervention ? `INTERVENTION · ${intervention.phase}` : inference.present ? phase : "DISCONNECTED";
 }
 
 function renderSafety() {

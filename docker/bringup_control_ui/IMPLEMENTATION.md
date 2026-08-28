@@ -136,7 +136,7 @@ Follower가 켜져 있으면 Leader 시작 즉시 Follower가 움직일 수 있�
 
 동일 조건을 우회해 s6 service를 직접 시작하는 경우에도 `avatar_bringup` 공통 preflight가 Follower topic publisher 6개를 확인한다.
 
-2026-08-12 현장 사고 로그에서는 Follower가 이미 정상 실행 중이었으나 A3 시작 약 2초 후 오른쪽 gripper 초기값 `-3.52`가 threshold `-0.50` 아래로 판정되어 `enable=3`과 `Start interpolation to save pose 3`가 자동 실행됐다. 같은 패턴이 여러 A3 시작 로그에서 반복 확인됐다. 즉 해당 사고는 Leader-first가 직접 원인이라기보다 gripper trigger의 startup edge 초기화 문제로 판단했다. UI/s6 A3 명령에 `launch_gripper_trigger:=false`를 추가해 이 shortcut을 비활성화했다. Foot switch와 일반 trajectory broadcaster는 유지한다.
+2026-08-12 현장 사고 로그에서는 Follower가 이미 정상 실행 중이었으나 A3 시작 약 2초 후 오른쪽 gripper 초기값 `-3.52`가 threshold `-0.50` 아래로 판정되어 `enable=3`과 `Start interpolation to save pose 3`가 자동 실행됐다. 같은 패턴이 여러 A3 시작 로그에서 반복 확인됐다. 즉 해당 사고는 Leader-first가 직접 원인이라기보다 gripper trigger의 startup edge 초기화 문제로 판단했다. 당시 UI/s6 A3 명령에서 shortcut을 차단했다. 2026-08-21에는 첫 유효 gripper sample을 무명령 baseline으로만 저장하고, 이후 above-to-below crossing만 인정하는 gate와 회귀 테스트를 추가한 뒤 `launch_gripper_trigger:=true`로 복원했다. 시작 시 이미 눌린 gripper는 한 번 풀었다가 다시 눌러야 동작한다.
 
 #### Follower 정상 종료
 
@@ -382,5 +382,41 @@ ai_worker_control
 - `interfaces` message type이 AI Worker 이미지에 없으면 inference phase 상세값 대신 service/RTC publisher/command stream 연결 상태로 보수적으로 판정한다.
 - UI 밖에서 시작된 프로세스는 감지할 수 있지만 안전하게 종료할 소유권은 없다.
 - Bring-down은 기존 `f2_bring_down.launch.py`와 executor 구현을 사용하므로 전역 step barrier는 init recovery에만 적용된다.
-- A3 gripper save-pose shortcut은 UI/s6 운영 경로에서 비활성화됐다. 기능을 다시 사용할 경우 `gripper_trigger`의 첫 sample 초기화 문제를 먼저 수정해야 한다.
+- A3 gripper save-pose shortcut은 첫 유효 sample 무명령 baseline gate를 거쳐 UI/s6 운영 경로에서 다시 활성화됐다. 시작 시 이미 threshold 아래인 입력은 명령을 만들지 않으며, release 후 fresh press에서만 save pose 3을 발행한다.
 - 개발 과정과 현장 로그 근거는 `DEVELOPMENT_LOG.md`에 기록한다.
+
+## 8. Inference Intervention
+
+Cyclo inference 화면에 사람의 실패 교정 데이터를 안전하게 취득하는 intervention 흐름을 추가했다. 정책 컨테이너는 종료하지 않고 모델을 메모리에 유지한다.
+
+```text
+INFERENCING
+  → STOP_INFERENCE / PAUSED 확인
+  → 실제 trajectory command quiet 확인
+  → A3 Leader 시작 및 joint feedback 확인
+  → START_INFERENCE_RECORD
+  → 사람 교정 조작
+  → 저장 또는 폐기
+  → Leader 종료 및 command quiet 확인
+  → RESUME_INFERENCE
+```
+
+AI Worker가 intervention lease와 단계를 보관하므로 여러 브라우저에서 동일한 상태를 본다. Cyclo supervisor의 `/api/intervention/*`는 host-network의 AI Worker `:8780` API를 프록시하며, AI Worker token이 설정된 경우 브라우저에 노출하지 않고 서버 환경 변수로 전달한다.
+
+Cyclo Inference 설정에는 Intervention 전용 Task Num/Name을 추가했다. 선택값은 기존 `TaskInfo.tags`에 URL encoding하여 ROS 인터페이스 변경 없이 브라우저와 orchestrator 사이에 동기화한다. `START_INFERENCE_RECORD`에서만 이를 `task_num/task_name`으로 승격하며, cyclo_data는 명시적 identity가 있으면 timestamp 강제 치환을 하지 않는다. 같은 identity는 기존 DataManager를 재사용해 episode를 누적하고, 선택값이 모두 비어 있으면 기존 timestamp 기반 inference dataset 동작을 유지한다.
+
+중간 오류, E-stop, DXL/feedback 단절 또는 PAUSED 상태 이탈이 발생하면 watchdog은 Leader를 종료하고 `PAUSED_SAFE`로 전환한다. 이 경로에서는 inference를 자동 재개하지 않는다.
+
+Intervention 시작 gate는 현재 검증 대상인 F2+A3 조합, Real Robot inference의 `PAUSED`, 정상 Follower/controller/feedback/DXL, E-stop 해제, 최근 policy trajectory command 없음과 Leader OFF를 모두 요구한다. Warm pause 동안 policy publisher 연결은 남을 수 있으므로 publisher 존재가 아니라 실제 최근 command 수신 여부로 hand-off를 판정한다.
+
+일반 `avatar_bringup` s6 preflight는 inference service, RTC publisher 또는 trajectory publisher 연결이 하나라도 남아 있으면 계속 종료 코드 64로 차단한다. Intervention에서만 AI Worker가 위 gate를 통과한 직후 `/run/ai_worker_intervention_preflight`에 20초짜리 일회용 hand-off lease를 만든다. s6는 version, 만료 시각과 선택 Leader 모델을 확인하고 파일을 즉시 소비한다. 이 lease는 PAUSED policy의 연결만 허용하며 Follower-first 검사는 우회하지 않는다. 따라서 UI의 일반 Leader ON이나 s6 직접 실행은 기존의 엄격한 차단을 그대로 적용받는다.
+
+### 8.1 Cyclo ROS interface 연결
+
+AI Worker Compose는 Cyclo의 `interfaces` 소스를 `/opt/cyclo_interfaces_src`에 읽기 전용으로 마운트한다. `bringup_control_ui/run.sh`는 이를 `/var/lib/ai_worker_cyclo_interfaces` 전용 overlay에 빌드하고 source한다.
+
+- Cyclo의 IDL이 단일 원본이다.
+- AI Worker controller의 `/root/ros2_ws/install`은 수정하지 않는다.
+- 최초 실행 또는 IDL 변경 시에만 overlay를 다시 빌드한다.
+- 공식 `interfaces/msg/InferenceStatus`, `RecordingStatus`, `RtcStatus` type support를 사용한다.
+- source 또는 빌드가 없으면 intervention은 `PAUSED`를 확인할 수 없어 fail-closed된다.

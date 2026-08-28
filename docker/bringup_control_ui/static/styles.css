@@ -33,6 +33,7 @@ html, body { min-height: 100%; }
 body { margin: 0; background: var(--mode-wash); color: var(--text); font-size: 14px; -webkit-font-smoothing: antialiased; transition: background .35s ease; }
 body[data-robot-mode="teleop"] { --mode-wash: #f2f8ff; }
 body[data-robot-mode="inference"] { --mode-wash: #f8f4ff; }
+body[data-robot-mode="intervention"] { --mode-wash: #fff7ed; }
 body[data-robot-mode="conflict"], body.critical { --mode-wash: #fff1f2; }
 button, select, input { font: inherit; }
 button { cursor: pointer; }
@@ -84,6 +85,8 @@ body[data-robot-mode="conflict"] #nav-teleop .mode-dot, body[data-robot-mode="co
 .mode-chip.teleop i { background: var(--teleop); }
 .mode-chip.inference { color: #6928c4; border-color: #d5bcff; background: var(--inference-soft); }
 .mode-chip.inference i { background: var(--inference); }
+.mode-chip.intervention { color:#9a3412;border-color:#fdba74;background:#fff7ed; }
+.mode-chip.intervention i { background:#f97316;animation:live-dot 1s infinite; }
 .mode-chip.conflict { color: #991b1b; border-color: #fecaca; background: var(--red-soft); }
 .mode-chip.conflict i { background: var(--red); animation: live-dot .8s infinite; }
 .text-button { padding: 7px 10px; border: 0; border-radius: 8px; background: transparent; color: var(--blue); font-weight: 700; }
@@ -166,6 +169,7 @@ select:focus, input:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgb
 .mode-stage h2 { font-size: 28px; letter-spacing: -.04em; }
 body[data-robot-mode="teleop"] .teleop-stage { color: #073b77; border-color: #a9d3ff; background: radial-gradient(circle at 90% 10%,#c4e1ff,#eaf5ff 48%,#fff); }
 body[data-robot-mode="inference"] .inference-stage { color: #4b1c96; border-color: #d5bcff; background: radial-gradient(circle at 90% 10%,#ddcaff,#f2eaff 48%,#fff); }
+body[data-robot-mode="intervention"] .inference-stage { color:#9a3412;border-color:#fdba74;background:radial-gradient(circle at 90% 10%,#fed7aa,#fff7ed 48%,#fff); }
 .signal-visual, .brain-visual { width: 170px; height: 110px; flex: 0 0 auto; position: relative; }
 .signal-visual i { position: absolute; top: 50%; left: 50%; border: 2px solid #b7bdc7; border-radius: 50%; transform: translate(-50%,-50%); }
 .signal-visual i:nth-child(1){width:40px;height:40px}.signal-visual i:nth-child(2){width:80px;height:80px}.signal-visual i:nth-child(3){width:120px;height:120px}

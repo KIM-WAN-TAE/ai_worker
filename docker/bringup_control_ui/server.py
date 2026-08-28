@@ -8,6 +8,7 @@ import glob
 import json
 import os
 import re
+import secrets
 import signal
 import subprocess
 import threading
@@ -31,9 +32,10 @@ from std_msgs.msg import Bool
 from trajectory_msgs.msg import JointTrajectory
 
 try:
-    from interfaces.msg import InferenceStatus, RtcStatus
+    from interfaces.msg import InferenceStatus, RecordingStatus, RtcStatus
 except ImportError:  # The policy interfaces package may live only in another container.
     InferenceStatus = None
+    RecordingStatus = None
     RtcStatus = None
 
 from logic import (
@@ -42,6 +44,8 @@ from logic import (
     SafetyState,
     diagnose_lines,
     gate_action,
+    gate_intervention_reset,
+    gate_intervention_start,
     operating_mode,
     parse_s6_status,
 )
@@ -59,6 +63,8 @@ STARTUP_GRACE_SECONDS = float(os.environ.get("BRINGUP_STARTUP_GRACE_SECONDS", "2
 LOG_ROOT = Path(os.environ.get("BRINGUP_LOG_ROOT", "/var/log"))
 ROBOT_TYPE_FILE = Path("/run/robot_type")
 LEADER_TYPE_FILE = Path("/run/leader_type")
+INTERVENTION_PREFLIGHT_LEASE = Path("/run/ai_worker_intervention_preflight")
+INTERVENTION_PREFLIGHT_ACK = Path("/run/ai_worker_intervention_preflight.ack")
 
 SERVICES = {"follower": "ai_worker_bringup", "leader": "avatar_bringup"}
 COMMAND_TOPICS = (
@@ -77,6 +83,7 @@ INFERENCE_SERVICES = ("/lerobot/inference_command", "/groot/inference_command")
 RTC_TOPICS = ("/groot/rtc_status", "/lerobot/rtc_status")
 INFERENCE_PHASES = {0: "READY", 1: "LOADING", 2: "INFERENCING", 3: "PAUSED"}
 RTC_PHASES = {0: "UNCONFIGURED", 1: "COLD_WARMUP", 2: "RUNNING", 3: "PAUSED", 4: "STOPPED", 5: "FAULT_LATCHED", 6: "INFEASIBLE"}
+RECORD_PHASES = {0: "READY", 1: "RECORDING", 2: "SAVING", 3: "PAUSED"}
 
 
 def utc_now() -> str:
@@ -186,6 +193,9 @@ class ControlCoordinator:
         "leader_stop": "STOPPING",
         "bring_down": "MOVING",
         "recover_init": "RECOVERING",
+        "intervention_start": "HANDING_OVER",
+        "intervention_end": "RETURNING_CONTROL",
+        "intervention_reset": "RESETTING",
     }
 
     def __init__(self) -> None:
@@ -236,9 +246,55 @@ class ControlCoordinator:
             return {"running": current is not None, "current": current, "last": dict(self._last) if self._last else None}
 
 
+class InterventionManager:
+    """Shared, server-owned intervention lease visible to every browser."""
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self._current: dict[str, Any] | None = None
+        self._last: dict[str, Any] | None = None
+
+    def begin(self, actor: str, model: str) -> None:
+        with self._lock:
+            if self._current is not None:
+                raise RuntimeError("다른 사용자의 Intervention이 이미 진행 중입니다.")
+            self._current = {
+                "phase": "PREPARING",
+                "actor": actor[:80],
+                "leader_model": model,
+                "started_at": utc_now(),
+                "updated_at": utc_now(),
+                "error": "",
+            }
+
+    def transition(self, phase: str, error: str = "") -> None:
+        with self._lock:
+            if self._current is None:
+                raise RuntimeError("진행 중인 Intervention이 없습니다.")
+            self._current["phase"] = phase
+            self._current["updated_at"] = utc_now()
+            self._current["error"] = error[:500]
+
+    def clear(self) -> None:
+        with self._lock:
+            if self._current is None:
+                return
+            self._last = {**self._current, "finished_at": utc_now()}
+            self._current = None
+
+    def snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            current = dict(self._current) if self._current else None
+            return {
+                "active": current is not None,
+                "current": current,
+                "last": dict(self._last) if self._last else None,
+            }
+
+
 class BringupMonitor(Node):
     def __init__(self) -> None:
-        super().__init__("ai_worker_bringup_control_ui")
+        super().__init__("ai_worker_intervention_controller")
         self.lock = threading.RLock()
         self.topic_seen: dict[str, float] = {}
         self.graph_topics: set[str] = set()
@@ -249,6 +305,7 @@ class BringupMonitor(Node):
         self.estop_active = False
         self.estop_seen: float | None = None
         self.inference = {"seen": None, "phase": None, "robot_type": "", "error": ""}
+        self.recording = {"seen": None, "phase": None, "task_name": ""}
         self.rtc: dict[str, dict[str, Any]] = {}
         self.operation: OperationManager | None = None
         qos = QoSProfile(depth=20, reliability=ReliabilityPolicy.BEST_EFFORT)
@@ -264,6 +321,8 @@ class BringupMonitor(Node):
             self.create_subscription(Bool, ESTOP_TOPIC, self._estop, 10)
         if InferenceStatus is not None:
             self.create_subscription(InferenceStatus, "/task/inference_status", self._inference, reliable)
+        if RecordingStatus is not None:
+            self.create_subscription(RecordingStatus, "/data/recording/status", self._recording, reliable)
         if RtcStatus is not None:
             for backend in ("groot", "lerobot"):
                 self.create_subscription(RtcStatus, f"/{backend}/rtc_status", lambda m, b=backend: self._rtc(b, m), reliable)
@@ -314,6 +373,14 @@ class BringupMonitor(Node):
                 "fault": str(msg.fault),
             }
 
+    def _recording(self, msg) -> None:
+        with self.lock:
+            self.recording = {
+                "seen": monotonic(),
+                "phase": int(msg.record_phase),
+                "task_name": str(msg.task_info.task_name),
+            }
+
     def _refresh_graph(self) -> None:
         try:
             topics = self.get_topic_names_and_types()
@@ -323,6 +390,7 @@ class BringupMonitor(Node):
                 "/joint_states",
                 "/ffw_follower/dxl_state",
                 "/task/inference_status",
+                "/data/recording/status",
                 *COMMAND_TOPICS,
                 *CONTROLLER_TOPICS,
                 *RTC_TOPICS,
@@ -349,6 +417,7 @@ class BringupMonitor(Node):
             dxl = dict(self.dxl)
             dxl["errors"] = dict(self.dxl.get("errors", {}))
             inference = dict(self.inference)
+            recording = dict(self.recording)
             rtc = {key: dict(value) for key, value in self.rtc.items()}
             publisher_counts = dict(self.publisher_counts)
             estop_active = self.estop_active
@@ -403,6 +472,12 @@ class BringupMonitor(Node):
                 },
                 "typed_status_available": InferenceStatus is not None,
             },
+            "recording": {
+                "phase": RECORD_PHASES.get(recording.get("phase"), "UNAVAILABLE"),
+                "phase_age": age(recording.get("seen")),
+                "task_name": recording.get("task_name", ""),
+                "typed_status_available": RecordingStatus is not None,
+            },
             "events": events,
         }
 
@@ -437,6 +512,11 @@ class BringupMonitor(Node):
 
 class ActionRequest(BaseModel):
     model: str = ""
+
+
+class InterventionRequest(BaseModel):
+    model: str = "a3"
+    outcome: str = ""
 
 
 def run_command(command: list[str], timeout: float = 15.0) -> subprocess.CompletedProcess[str]:
@@ -484,13 +564,14 @@ rclpy.init()
 node = BringupMonitor()
 operation = OperationManager(node.event)
 coordinator = ControlCoordinator()
+intervention = InterventionManager()
 node.set_operation_manager(operation)
 executor = SingleThreadedExecutor()
 executor.add_node(node)
 ros_thread = threading.Thread(target=executor.spin, name="bringup-control-ros", daemon=True)
 ros_thread.start()
 
-app = FastAPI(title="AI Worker Bring-up Control")
+app = FastAPI(title="AI Worker Intervention Controller")
 
 
 def selected_models() -> tuple[str, str]:
@@ -546,6 +627,7 @@ def build_snapshot() -> dict[str, Any]:
     control = coordinator.snapshot()
     last_pose_result = op.get("last_result") or {}
     last_control_result = control.get("last") or {}
+    intervention_state = intervention.snapshot()
     bring_down_complete = bool(
         follower_runtime
         and follower_model == "f2"
@@ -561,6 +643,7 @@ def build_snapshot() -> dict[str, Any]:
         inference_present=bool(ros["inference"]["present"]),
         inference_active=bool(ros["inference"]["active"]),
         inference_phase=str(ros["inference"]["phase"]),
+        intervention_active=bool(intervention_state["active"]),
     )
     safety = SafetyState(
         physical_control_enabled=PHYSICAL_CONTROL_ENABLED,
@@ -597,6 +680,7 @@ def build_snapshot() -> dict[str, Any]:
         "ros": ros,
         "operation": op,
         "control": control,
+        "intervention": intervention_state,
         "mode": mode,
         "shutdown": {
             "bring_down_recommended": bool(follower_runtime and follower_model == "f2"),
@@ -648,6 +732,146 @@ def change_service(role: str, up: bool) -> None:
         _service_cache = (0.0, {})
 
 
+def create_intervention_preflight_lease(model: str) -> str:
+    """Create a short-lived, one-shot exception for the s6 Leader preflight."""
+    clear_intervention_preflight_lease()
+    expires_epoch = int(time.time()) + 20
+    nonce = secrets.token_hex(16)
+    temporary = INTERVENTION_PREFLIGHT_LEASE.with_name(
+        f"{INTERVENTION_PREFLIGHT_LEASE.name}.{os.getpid()}.tmp"
+    )
+    temporary.write_text(f"v1 {expires_epoch} {model} {nonce}\n", encoding="utf-8")
+    temporary.chmod(0o600)
+    os.replace(temporary, INTERVENTION_PREFLIGHT_LEASE)
+    return nonce
+
+
+def clear_intervention_preflight_lease() -> None:
+    for path in (INTERVENTION_PREFLIGHT_LEASE, INTERVENTION_PREFLIGHT_ACK):
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def wait_for_intervention_preflight_ack(nonce: str, timeout: float = 8.0) -> bool:
+    """Wait until s6 proves that it consumed and validated this exact lease."""
+    deadline = monotonic() + timeout
+    while monotonic() < deadline:
+        try:
+            acknowledged = INTERVENTION_PREFLIGHT_ACK.read_text(encoding="utf-8").strip()
+        except FileNotFoundError:
+            time.sleep(0.05)
+            continue
+        try:
+            INTERVENTION_PREFLIGHT_ACK.unlink()
+        except FileNotFoundError:
+            pass
+        return secrets.compare_digest(acknowledged, nonce)
+    return False
+
+
+def wait_for_snapshot(predicate: Callable[[dict[str, Any]], bool], timeout: float) -> dict[str, Any]:
+    deadline = monotonic() + timeout
+    latest = build_snapshot()
+    while monotonic() < deadline:
+        latest = build_snapshot()
+        if predicate(latest):
+            return latest
+        time.sleep(0.2)
+    return latest
+
+
+def intervention_start_gate(snapshot: dict[str, Any]) -> dict[str, Any]:
+    safety = snapshot["safety"]
+    ros = snapshot["ros"]
+    gate = gate_intervention_start(
+        SafetyState(
+            physical_control_enabled=bool(safety["physical_control_enabled"]),
+            estop_active=bool(ros["estop"]["active"]),
+            estop_signal_ready=(
+                not ros["estop"]["configured"]
+                or (
+                    ros["estop"]["signal_seen"]
+                    and ros["estop"]["age"] is not None
+                    and ros["estop"]["age"] < FRESH_SECONDS
+                    and not ros["estop"]["active"]
+                )
+            ),
+            critical_fault=bool(safety["critical"]),
+            inference_present=bool(ros["inference"]["present"]),
+            inference_active=bool(ros["inference"]["active"]),
+            leader_up=bool(safety["leader_runtime_active"]),
+            leader_stream_active=bool(safety["leader_stream_active"]),
+            # A paused policy keeps publishers connected. Intervention only
+            # requires the actual command stream to have gone quiet.
+            command_stream_active=bool(safety["command_recent"]),
+            follower_up=bool(safety["follower_runtime_active"]),
+            controllers_ready=bool(safety["controllers_ready"]),
+            feedback_fresh=bool(safety["feedback_fresh"]),
+            dxl_ok=bool(safety["dxl_ok"]),
+            operation_running=bool(snapshot["operation"]["running"]),
+            # The intervention endpoint holds the coordinator lock while it
+            # evaluates this gate, so its own transition is not a conflict.
+            control_busy=False,
+            selected_follower=str(snapshot["selected"]["follower"]),
+        ),
+        str(ros["inference"]["phase"]),
+    )
+    return gate.to_dict()
+
+
+def intervention_watchdog_loop() -> None:
+    """Fail closed if safety or inference ownership changes mid-intervention."""
+    while True:
+        time.sleep(0.25)
+        current = intervention.snapshot()["current"]
+        if not current or current.get("phase") not in {"PREPARING", "READY", "RECORDING"}:
+            continue
+        snapshot = build_snapshot()
+        reasons: list[str] = []
+        if snapshot["ros"]["estop"]["active"]:
+            reasons.append("E-stop 감지")
+        if snapshot["ros"]["inference"]["phase"] != "PAUSED":
+            reasons.append("Inference PAUSED 상태 이탈")
+        if current.get("phase") in {"READY", "RECORDING"}:
+            if not snapshot["safety"]["feedback_fresh"]:
+                reasons.append("Follower joint feedback 단절")
+            if not snapshot["safety"]["dxl_ok"]:
+                reasons.append("Follower DXL 상태 이상")
+        if not reasons or not coordinator.try_acquire():
+            continue
+        error = " · ".join(reasons)
+        announced = False
+        try:
+            coordinator.announce(
+                "intervention_end",
+                "safety-watchdog",
+                str(current.get("leader_model", "")),
+            )
+            announced = True
+            if snapshot["services"]["leader"]["managed"]:
+                change_service("leader", False)
+            intervention.transition("PAUSED_SAFE", error)
+            node.event("danger", f"Intervention watchdog 안전 차단: {error}")
+        except Exception as exc:
+            intervention.transition("PAUSED_SAFE", f"{error} · Leader 종료 실패: {exc}")
+            node.event("danger", f"Intervention watchdog Leader 종료 실패: {exc}")
+        finally:
+            if announced:
+                coordinator.finish(False, error)
+            else:
+                coordinator.release()
+
+
+intervention_watchdog_thread = threading.Thread(
+    target=intervention_watchdog_loop,
+    name="intervention-safety-watchdog",
+    daemon=True,
+)
+intervention_watchdog_thread.start()
+
+
 @app.get("/")
 def index() -> FileResponse:
     return FileResponse(STATIC / "index.html", headers={"Cache-Control": "no-store"})
@@ -681,6 +905,211 @@ def logs(source: str = Query("follower", pattern="^(follower|leader|operation)$"
     else:
         lines = log_tail(SERVICES[source], 400)
     return {"source": source, "lines": lines, "diagnostics": diagnose_lines(lines)}
+
+
+@app.get("/api/intervention/state")
+def intervention_state() -> dict[str, Any]:
+    snapshot = build_snapshot()
+    return {
+        **snapshot["intervention"],
+        "inference_phase": snapshot["ros"]["inference"]["phase"],
+        "record_phase": snapshot["ros"]["recording"]["phase"],
+        "leader_up": snapshot["safety"]["leader_runtime_active"],
+        "command_recent": snapshot["safety"]["command_recent"],
+    }
+
+
+@app.post("/api/intervention/{action}")
+def intervention_action(
+    action: str,
+    body: InterventionRequest,
+    http_request: Request,
+    x_control_token: str | None = Header(default=None),
+    x_control_client: str | None = Header(default=None),
+) -> dict[str, Any]:
+    if action not in {"start", "recording", "end", "complete", "abort", "reset"}:
+        raise HTTPException(404, "지원하지 않는 Intervention 작업입니다.")
+    authorize("intervention", x_control_token)
+    actor = (x_control_client or (http_request.client.host if http_request.client else "browser")).strip() or "browser"
+
+    if action == "recording":
+        current = intervention.snapshot()["current"]
+        if not current or current.get("phase") not in {"READY", "RECORDING"}:
+            raise HTTPException(409, "Leader hand-off가 완료된 Intervention이 없습니다.")
+        observed = wait_for_snapshot(
+            lambda item: item["ros"]["recording"]["phase"] == "RECORDING",
+            4.0,
+        )
+        if observed["ros"]["recording"]["typed_status_available"] and observed["ros"]["recording"]["phase"] != "RECORDING":
+            raise HTTPException(409, "Cyclo recording이 RECORDING 상태로 확인되지 않았습니다.")
+        intervention.transition("RECORDING")
+        node.event("warning", f"Intervention 실패 구간 녹화 시작 · {actor}")
+        return {"ok": True, **intervention.snapshot()}
+
+    if action == "complete":
+        current = intervention.snapshot()["current"]
+        if not current or current.get("phase") != "READY_TO_RESUME":
+            raise HTTPException(409, "Resume 완료를 확인할 Intervention이 없습니다.")
+        snapshot = wait_for_snapshot(
+            lambda item: item["ros"]["inference"]["phase"] == "INFERENCING",
+            5.0,
+        )
+        if snapshot["ros"]["inference"]["phase"] != "INFERENCING":
+            raise HTTPException(409, "Inference가 INFERENCING으로 복귀한 것이 확인되지 않았습니다.")
+        if snapshot["safety"]["leader_runtime_active"]:
+            raise HTTPException(409, "Leader가 남아 있어 Intervention을 완료할 수 없습니다.")
+        intervention.clear()
+        node.event("info", f"Intervention 종료, Inference 복귀 완료 · {actor}")
+        return {"ok": True, **intervention.snapshot()}
+
+    if not coordinator.try_acquire():
+        raise HTTPException(409, "다른 사용자의 로봇 제어 요청이 처리 중입니다.")
+
+    announced = False
+    ok = False
+    error = ""
+    try:
+        if action == "start":
+            model = body.model.strip().lower() or "a3"
+            if model not in LEADER_MODELS:
+                raise HTTPException(400, "지원하지 않는 Leader 모델입니다.")
+            if intervention.snapshot()["active"]:
+                raise HTTPException(409, "Intervention이 이미 진행 중입니다.")
+            snapshot = wait_for_snapshot(
+                lambda item: (
+                    item["ros"]["inference"]["phase"] == "PAUSED"
+                    and not item["safety"]["command_recent"]
+                ),
+                COMMAND_QUIET_SECONDS + 3.0,
+            )
+            gate = intervention_start_gate(snapshot)
+            if not gate["ok"]:
+                raise HTTPException(409, {"message": "Intervention 안전 조건을 통과하지 못했습니다.", **gate})
+            coordinator.announce("intervention_start", actor, model)
+            announced = True
+            intervention.begin(actor, model)
+            LEADER_TYPE_FILE.write_text(model + "\n", encoding="utf-8")
+            lease_nonce = create_intervention_preflight_lease(model)
+            try:
+                change_service("leader", True)
+                if not wait_for_intervention_preflight_ack(lease_nonce):
+                    raise RuntimeError(
+                        "Leader s6 preflight가 Intervention hand-off 허가를 확인하지 못했습니다."
+                    )
+            except Exception:
+                clear_intervention_preflight_lease()
+                raise
+            ready = wait_for_snapshot(
+                lambda item: (
+                    item["safety"]["leader_runtime_active"]
+                    and item["ros"]["leader_joint_state_age"] is not None
+                    and item["ros"]["leader_joint_state_age"] < FRESH_SECONDS
+                ),
+                20.0,
+            )
+            if not (
+                ready["safety"]["leader_runtime_active"]
+                and ready["ros"]["leader_joint_state_age"] is not None
+                and ready["ros"]["leader_joint_state_age"] < FRESH_SECONDS
+            ):
+                raise RuntimeError("Leader joint feedback이 제한 시간 안에 준비되지 않았습니다.")
+            if (
+                ready["ros"]["estop"]["active"]
+                or ready["ros"]["inference"]["phase"] != "PAUSED"
+                or not ready["safety"]["feedback_fresh"]
+                or not ready["safety"]["dxl_ok"]
+            ):
+                raise RuntimeError("Leader 준비 중 안전 상태가 변경되어 조작권 전환을 중단했습니다.")
+            intervention.transition("READY")
+            node.event("warning", f"Intervention 조작권을 {LEADER_MODELS[model]['label']} Leader로 전환 · {actor}")
+
+        elif action == "end":
+            current = intervention.snapshot()["current"]
+            if not current or current.get("phase") not in {"READY", "RECORDING"}:
+                raise HTTPException(409, "종료할 Intervention이 없습니다.")
+            coordinator.announce("intervention_end", actor, str(current.get("leader_model", "")))
+            announced = True
+            intervention.transition("RETURNING")
+            snapshot = build_snapshot()
+            if snapshot["safety"]["leader_runtime_active"] and not snapshot["services"]["leader"]["managed"]:
+                raise RuntimeError("Leader가 UI 밖에서 실행되어 안전하게 종료할 수 없습니다.")
+            if snapshot["services"]["leader"]["managed"]:
+                change_service("leader", False)
+            quiet = wait_for_snapshot(
+                lambda item: not item["safety"]["leader_runtime_active"] and not item["safety"]["command_recent"],
+                10.0,
+            )
+            if quiet["safety"]["leader_runtime_active"] or quiet["safety"]["command_recent"]:
+                raise RuntimeError("Leader 종료 후 command quiet 상태를 확인하지 못했습니다.")
+            intervention.transition("READY_TO_RESUME")
+            node.event("warning", f"Intervention Leader 종료, Inference Resume 대기 · {actor}")
+
+        elif action == "reset":
+            current = intervention.snapshot()["current"]
+            if not current:
+                return {"ok": True, **intervention.snapshot()}
+            snapshot = build_snapshot()
+            gate = gate_intervention_reset(
+                str(current.get("phase", "")),
+                leader_up=bool(snapshot["safety"]["leader_runtime_active"]),
+                command_recent=bool(snapshot["safety"]["command_recent"]),
+                recording_phase=str(snapshot["ros"]["recording"]["phase"]),
+            )
+            if not gate.ok:
+                raise HTTPException(
+                    409,
+                    {
+                        "message": "Intervention 초기화 안전 조건을 통과하지 못했습니다.",
+                        **gate.to_dict(),
+                    },
+                )
+            coordinator.announce(
+                "intervention_reset",
+                actor,
+                str(current.get("leader_model", "")),
+            )
+            announced = True
+            intervention.clear()
+            node.event("warning", f"Intervention 종료, 새 Inference 시작 대기 · {actor}")
+
+        else:  # abort: fail closed; never resume inference here.
+            current = intervention.snapshot()["current"]
+            if not current:
+                return {"ok": True, **intervention.snapshot()}
+            coordinator.announce("intervention_end", actor, str(current.get("leader_model", "")))
+            announced = True
+            snapshot = build_snapshot()
+            if snapshot["services"]["leader"]["managed"]:
+                change_service("leader", False)
+            wait_for_snapshot(
+                lambda item: not item["safety"]["leader_runtime_active"] and not item["safety"]["command_recent"],
+                10.0,
+            )
+            intervention.transition("PAUSED_SAFE", "사용자 중단 — Inference는 자동 재개하지 않았습니다.")
+            node.event("danger", f"Intervention 안전 중단, Inference PAUSED 유지 · {actor}")
+
+        ok = True
+        return {"ok": True, **intervention.snapshot()}
+    except Exception as exc:
+        error = str(exc.detail) if isinstance(exc, HTTPException) else str(exc)
+        current = intervention.snapshot()["current"]
+        if current:
+            try:
+                snapshot = build_snapshot()
+                if snapshot["services"]["leader"]["managed"]:
+                    change_service("leader", False)
+            except Exception:
+                pass
+            intervention.transition("PAUSED_SAFE", error)
+        node.event("danger", f"Intervention {action} 실패 · {actor}: {error}")
+        if isinstance(exc, HTTPException):
+            raise
+        raise HTTPException(500, error) from exc
+    finally:
+        if announced:
+            coordinator.finish(ok, error)
+        else:
+            coordinator.release()
 
 
 @app.post("/api/actions/{action}")

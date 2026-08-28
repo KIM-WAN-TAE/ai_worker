@@ -2,6 +2,15 @@
 
 로봇 내부에서 Follower/Leader bring-up, F2 bring-down과 init-pose 복구를 관리하는 ROS 상태 기반 웹 콘솔입니다.
 
+## Runtime ownership
+
+Intervention 안전 기능은 이 선택형 UI 프로세스와 독립적으로 동작합니다.
+`intervention_controller`는 `8779`에서 loopback 전용 s6 상주 서비스로
+실행되며 Intervention lease, 안전 gate, Leader hand-off와 watchdog을
+소유합니다. `ai_worker_control`은 임시 운영 UI를 위해 `8780`에 LAN
+프록시만 엽니다. 따라서 이 명령을 종료해도 Intervention controller와
+진행 상태는 종료되거나 초기화되지 않습니다.
+
 관련 문서:
 
 - [USER_GUIDE.md](USER_GUIDE.md): 현장 사용설명서와 안전 절차

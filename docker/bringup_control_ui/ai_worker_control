@@ -3,7 +3,8 @@ set -euo pipefail
 
 pid_file="/run/ai_worker_control.pid"
 port="${BRINGUP_CONTROL_PORT:-8780}"
-runner="/root/ros2_ws/src/ai_worker/docker/bringup_control_ui/run.sh"
+controller_port="${INTERVENTION_CONTROL_PORT:-8779}"
+proxy="/root/ros2_ws/src/ai_worker/docker/bringup_control_ui/ui_proxy.py"
 
 running_pid() {
   if [ ! -f "${pid_file}" ]; then
@@ -17,7 +18,7 @@ running_pid() {
   fi
   local command_line
   command_line=$(tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null || true)
-  if [[ "${command_line}" != *"uvicorn server:app"* ]]; then
+  if [[ "${command_line}" != *"ui_proxy.py"* ]]; then
     echo "Ignoring stale AI Worker Control pid file (${pid}: ${command_line:-unknown process})." >&2
     rm -f "${pid_file}"
     return 1
@@ -81,6 +82,11 @@ if pid=$(running_pid); then
   exit 0
 fi
 
+if ! curl -fsS --max-time 2 "http://127.0.0.1:${controller_port}/api/state" >/dev/null 2>&1; then
+  echo "Intervention Controller is not ready on 127.0.0.1:${controller_port}." >&2
+  exit 1
+fi
+
 if curl -fsS --max-time 1 "http://127.0.0.1:${port}/api/state" >/dev/null 2>&1; then
   echo "Port ${port} is already used by another control UI process." >&2
   exit 1
@@ -102,11 +108,10 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
-ENABLE_BRINGUP_CONTROL=true \
-BRINGUP_CONTROL_TOKEN="" \
 BRINGUP_CONTROL_HOST="0.0.0.0" \
 BRINGUP_CONTROL_PORT="${port}" \
-"${runner}" &
+INTERVENTION_CONTROL_PORT="${controller_port}" \
+python3 "${proxy}" &
 child_pid=$!
 printf '%s\n' "${child_pid}" > "${pid_file}"
 

@@ -1,4 +1,6 @@
 #!/command/with-contenv bash
 set -e
 
-exec /root/ros2_ws/src/ai_worker/docker/bringup_control_ui/run.sh
+# Optional operator UI only. Intervention state and safety are owned by the
+# always-on intervention_controller service.
+exec python3 /root/ros2_ws/src/ai_worker/docker/bringup_control_ui/ui_proxy.py

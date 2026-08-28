@@ -39,6 +39,42 @@ echo "${PGID}" > /run/${SERVICE_NAME}.pgid || true
 source /opt/ros/${ROS_DISTRO}/setup.bash
 source ${COLCON_WS}/install/setup.bash
 
+# An intervention starts the Leader while a policy container remains loaded
+# but PAUSED. The web supervisor may grant this script one short-lived,
+# one-shot exception only after it has independently verified PAUSED state,
+# command quiet, Follower feedback/controllers, DXL, and E-stop gates.
+INTERVENTION_HANDOFF=false
+INTERVENTION_LEASE_FILE="/run/ai_worker_intervention_preflight"
+INTERVENTION_ACK_FILE="/run/ai_worker_intervention_preflight.ack"
+if [ "${SERVICE_NAME}" = "avatar_bringup" ] && [ -f "${INTERVENTION_LEASE_FILE}" ]; then
+    LEASE_VERSION=""
+    LEASE_EXPIRES=""
+    LEASE_MODEL=""
+    LEASE_NONCE=""
+    read -r LEASE_VERSION LEASE_EXPIRES LEASE_MODEL LEASE_NONCE < "${INTERVENTION_LEASE_FILE}" || true
+    rm -f "${INTERVENTION_LEASE_FILE}"
+    NOW_EPOCH=$(date +%s)
+    SELECTED_LEADER="a3"
+    if [ -f /run/leader_type ]; then
+        SELECTED_LEADER=$(tr -d '[:space:]' < /run/leader_type | tr '[:upper:]' '[:lower:]')
+    fi
+    if [[ "${LEASE_EXPIRES}" =~ ^[0-9]+$ ]] \
+        && [ "${LEASE_VERSION}" = "v1" ] \
+        && [ "${LEASE_MODEL}" = "${SELECTED_LEADER}" ] \
+        && [[ "${LEASE_NONCE}" =~ ^[a-f0-9]{32}$ ]] \
+        && [ "${LEASE_EXPIRES}" -ge "${NOW_EPOCH}" ] \
+        && [ "${LEASE_EXPIRES}" -le "$((NOW_EPOCH + 20))" ]; then
+        INTERVENTION_HANDOFF=true
+        INTERVENTION_ACK_TEMP="${INTERVENTION_ACK_FILE}.$$"
+        printf '%s\n' "${LEASE_NONCE}" > "${INTERVENTION_ACK_TEMP}"
+        chmod 0600 "${INTERVENTION_ACK_TEMP}"
+        mv -f "${INTERVENTION_ACK_TEMP}" "${INTERVENTION_ACK_FILE}"
+        echo "[${SERVICE_NAME}] Valid one-shot intervention hand-off lease accepted."
+    else
+        echo "[${SERVICE_NAME}] Invalid or expired intervention hand-off lease; normal safety preflight applies." >&2
+    fi
+fi
+
 # Physical robot bringup must never overlap a running policy container.
 # Policy containers expose one of these services as soon as they start, even
 # while the model session itself is STOPPED.  Fail closed if discovery cannot
@@ -55,11 +91,13 @@ if [ "${SERVICE_NAME}" = "ai_worker_bringup" ] || [ "${SERVICE_NAME}" = "avatar_
         grep -E '^/(lerobot|groot)/inference_command$' "${INFERENCE_SERVICES_FILE}" || true
     )
     rm -f "${INFERENCE_SERVICES_FILE}"
-    if [ -n "${ACTIVE_INFERENCE_SERVICES}" ]; then
+    if [ -n "${ACTIVE_INFERENCE_SERVICES}" ] && [ "${INTERVENTION_HANDOFF}" != true ]; then
         echo "[${SERVICE_NAME}] SAFETY BLOCK: inference service is still active:" >&2
         echo "${ACTIVE_INFERENCE_SERVICES}" >&2
         echo "[${SERVICE_NAME}] STOP, UNLOAD, and stop all inference containers before bringup." >&2
         exit 64
+    elif [ -n "${ACTIVE_INFERENCE_SERVICES}" ]; then
+        echo "[${SERVICE_NAME}] Intervention hand-off: PAUSED inference service connection allowed."
     fi
 
     # Newer policy runtimes may expose read-only RTC telemetry before (or
@@ -70,11 +108,14 @@ if [ "${SERVICE_NAME}" = "ai_worker_bringup" ] || [ "${SERVICE_NAME}" = "avatar_
         RTC_TOPIC_INFO=$(mktemp)
         if timeout 5s ros2 topic info "${RTC_TOPIC}" > "${RTC_TOPIC_INFO}" 2>/dev/null; then
             RTC_PUBLISHERS=$(sed -n 's/^Publisher count: //p' "${RTC_TOPIC_INFO}" | tr -d '[:space:]')
-            if [ -n "${RTC_PUBLISHERS}" ] && [ "${RTC_PUBLISHERS}" -gt 0 ]; then
+            if [ -n "${RTC_PUBLISHERS}" ] && [ "${RTC_PUBLISHERS}" -gt 0 ] \
+                && [ "${INTERVENTION_HANDOFF}" != true ]; then
                 echo "[${SERVICE_NAME}] SAFETY BLOCK: policy runtime is publishing ${RTC_TOPIC}." >&2
                 echo "[${SERVICE_NAME}] STOP, UNLOAD, and stop the policy container before hardware startup." >&2
                 rm -f "${RTC_TOPIC_INFO}" "${INFERENCE_SERVICES_FILE}"
                 exit 64
+            elif [ -n "${RTC_PUBLISHERS}" ] && [ "${RTC_PUBLISHERS}" -gt 0 ]; then
+                echo "[${SERVICE_NAME}] Intervention hand-off: ${RTC_TOPIC} publisher connection allowed."
             fi
         fi
         rm -f "${RTC_TOPIC_INFO}"
@@ -88,11 +129,14 @@ if [ "${SERVICE_NAME}" = "ai_worker_bringup" ] || [ "${SERVICE_NAME}" = "avatar_
         COMMAND_TOPIC_INFO=$(mktemp)
         if timeout 5s ros2 topic info "${COMMAND_TOPIC}" > "${COMMAND_TOPIC_INFO}" 2>/dev/null; then
             COMMAND_PUBLISHERS=$(sed -n 's/^Publisher count: //p' "${COMMAND_TOPIC_INFO}" | tr -d '[:space:]')
-            if [ -n "${COMMAND_PUBLISHERS}" ] && [ "${COMMAND_PUBLISHERS}" -gt 0 ]; then
+            if [ -n "${COMMAND_PUBLISHERS}" ] && [ "${COMMAND_PUBLISHERS}" -gt 0 ] \
+                && [ "${INTERVENTION_HANDOFF}" != true ]; then
                 echo "[${SERVICE_NAME}] SAFETY BLOCK: command publisher is connected to ${COMMAND_TOPIC}." >&2
                 echo "[${SERVICE_NAME}] Stop the command source before starting robot hardware." >&2
                 rm -f "${COMMAND_TOPIC_INFO}"
                 exit 64
+            elif [ -n "${COMMAND_PUBLISHERS}" ] && [ "${COMMAND_PUBLISHERS}" -gt 0 ]; then
+                echo "[${SERVICE_NAME}] Intervention hand-off: quiet publisher connection allowed on ${COMMAND_TOPIC}."
             fi
         fi
         rm -f "${COMMAND_TOPIC_INFO}"

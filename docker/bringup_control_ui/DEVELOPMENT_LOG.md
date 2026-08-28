@@ -307,3 +307,46 @@ Inference 또는 Teleop runtime이 새로 감지되면 해당 mode 화면으로 
 LeRobot 사용 후 GR00T으로 전환한 경우 현재 선택된 GR00T만 OFF되고 이전 `lerobot_server`가 남아 `/lerobot/inference_command`와 `/lerobot/rtc_status`를 계속 제공하는 현상을 확인했다. AI Worker는 이를 정상적으로 inference 가능 process로 판정해 mode와 Leader 안전 gate를 유지했다.
 
 Cyclo의 Policy Backend OFF 동작을 전역 inference 종료 경계로 변경했다. 사용자가 어느 backend 화면에서 OFF를 누르더라도 LeRobot과 GR00T backend를 모두 종료한다. 따라서 현장 절차는 `Stop → Clear → OFF`만으로 끝나며 별도의 `docker stop`은 필요하지 않다. 현재 잔존 backend도 Cyclo supervisor API로 종료했고 AI Worker가 `STANDBY`, service 0개, RTC publisher 0개로 전환되는 것을 확인했다.
+
+## 17. Inference Intervention UI
+
+2026-08-19에 기존 Docker OFF/ON 절차를 Cyclo의 warm `STOP_INFERENCE`/`RESUME_INFERENCE` 흐름으로 교체했다. 기존 inference task metadata를 사용하는 `START/STOP/CANCEL_INFERENCE_RECORD`와 A3 Leader hand-off를 하나의 UI 시퀀스로 연결했다.
+
+AI Worker에는 공용 intervention lease와 `PREPARING`, `READY`, `RECORDING`, `RETURNING`, `READY_TO_RESUME`, `PAUSED_SAFE` 상태를 추가했다. Leader 시작 전 Follower controller, feedback, DXL, E-stop, inference PAUSED와 실제 command quiet를 확인한다. 오류 경로는 Leader를 내리고 inference를 자동 재개하지 않는다. E-stop, DXL/feedback 단절과 inference의 예기치 않은 Resume도 watchdog이 감시한다.
+
+Cyclo supervisor는 AI Worker API를 same-origin `/api/intervention/*`로 프록시한다. Cyclo inference 툴바에는 `Intervene`, `Save`, `Discard`, `Abort`, `Resume`만 노출했으며 모든 브라우저가 서버 상태를 공유한다. AI Worker UI도 이를 일반 runtime 충돌이 아니라 명시적 `INTERVENTION` 모드로 표시한다.
+
+검증 결과는 AI Worker unit test 22개, Cyclo supervisor proxy test 2개, Cyclo inference UI test 11개 통과 및 production UI build 통과다. 실제 F2+A3에서 실패 데이터 저장 결과, Leader OFF→policy Resume, intervention 중 E-stop과 브라우저 종료는 현장 검증이 남아 있다.
+
+## 18. Cyclo typed status 연결
+
+2026-08-19 AI Worker에 없던 Cyclo `interfaces` type support를 controller workspace와 분리된 overlay로 연결했다. Compose는 Cyclo IDL 원본을 읽기 전용으로 마운트하며 AI Worker Control runner가 최초 실행/IDL 변경 시에만 전용 overlay를 빌드한다.
+
+실행 확인:
+
+- `InferenceStatus`, `RecordingStatus`, `RtcStatus` Python type import 성공
+- AI Worker `/api/state`에서 inference/recording `typed_status_available=true`
+- 실제 `/data/recording/status`의 `READY` 수신
+- Follower controller, joint feedback과 DXL 정상 유지
+- Leader/Inference OFF와 최근 command 없음 확인
+- Inference가 없는 상태의 intervention POST가 409로 차단되고 Leader가 시작되지 않음 확인
+
+실제 policy PAUSE, A3 hand-off, 교정 녹화, Leader OFF와 policy Resume은 현장 E-stop을 준비한 상태에서 수행해야 한다.
+
+## 19. 첫 Intervention hand-off 실패 수정
+
+2026-08-19 첫 현장 시도에서 Cyclo의 `STOP_INFERENCE`와 AI Worker의 `PAUSED` 확인까지는 성공했지만 A3 Leader가 시작되지 않았고, joint feedback 20초 timeout 뒤 `PAUSED_SAFE`가 됐다. Recording은 Leader feedback 확인 이후에만 시작하도록 되어 있어 `READY`에 머문 것이 정상 fail-closed 동작이었다.
+
+원인은 일반 s6 preflight가 warm-paused policy의 inference service, RTC publisher와 연결된 trajectory publisher까지 실행 중으로 간주해 `avatar_bringup`을 종료 코드 64로 차단한 것이었다. 실제 command는 quiet였지만 연결 자체를 금지하는 일반 Bring-up 규칙과 Intervention의 warm hand-off 요구가 충돌했다.
+
+일반 안전검사를 약화하지 않고, AI Worker가 F2+A3, inference `PAUSED`, command quiet, Follower controller/feedback/DXL과 E-stop gate를 모두 확인한 뒤에만 20초짜리 일회용 s6 hand-off lease를 발급하도록 변경했다. s6는 lease를 즉시 소비하며 선택 모델과 만료 시각이 맞을 때만 PAUSED policy 연결을 허용한다. Follower-first 검사는 그대로 유지되고 일반 Leader ON이나 직접 s6 시작에는 lease가 없어 계속 차단된다. API의 예상치 못한 예외도 이제 브라우저의 일반 `Internal Server Error` 대신 실제 실패 문구를 반환한다.
+
+첫 배포 후 `s6-rc change`가 실제 longrun 실행보다 약 2초 먼저 반환하면서 웹 서버의 `finally`가 lease를 선삭제하는 경쟁 조건이 확인됐다. Lease에 128-bit nonce를 추가하고 s6가 version, 만료 시각, 모델과 nonce를 검증한 뒤 acknowledgement를 기록하도록 변경했다. 웹 서버는 동일 nonce의 acknowledgement를 확인해야만 feedback 대기로 넘어가며, 확인되지 않으면 모호한 feedback timeout 대신 s6 hand-off 승인 실패를 즉시 보고한다.
+
+## 20. Intervention Dataset 누적 저장
+
+기존 inference 녹화는 `task_type=inference`이면 Record 화면의 Task Num/Name과 무관하게 매번 `Task_<UTC시각>_inference_MCAP`을 새로 만들었다. 따라서 Intervention Save가 각각 별도 폴더의 episode 0으로 저장됐고, hand-off 실패/Discard 시에는 12KB 정도의 빈 session 골격도 남았다.
+
+Inference 설정에 Intervention Dataset Task Num/Name을 추가했다. 두 값은 `TaskInfo.tags`로 여러 브라우저에 동기화되고 녹화 시작에만 저장 identity로 사용된다. 두 값이 모두 있으면 같은 폴더에 episode를 이어 쓰며, 모두 비어 있으면 기존 timestamp 동작을 유지한다. 부분 입력, 경로 구분자, 제어 문자와 100자 초과 값은 녹화 전에 차단한다.
+
+검증 결과 cyclo_data recorder test 23개, 관련 Cyclo UI test 49개가 통과했고 production build를 완료했다. 실행 중 Cyclo는 s6 관리 서비스로 재시작했으며 새 UI bundle과 cyclo_data symlink-install source가 로드됐다.

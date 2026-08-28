@@ -1,0 +1,11 @@
+#!/command/with-contenv bash
+set -e
+
+# This loopback-only controller owns Intervention state and its safety
+# watchdog. The optional ai_worker_control UI merely proxies to this service.
+export ENABLE_BRINGUP_CONTROL=true
+export BRINGUP_CONTROL_HOST="${INTERVENTION_CONTROL_HOST:-127.0.0.1}"
+export BRINGUP_CONTROL_PORT="${INTERVENTION_CONTROL_PORT:-8779}"
+export BRINGUP_CONTROL_TOKEN="${INTERVENTION_CONTROL_TOKEN:-}"
+
+exec /root/ros2_ws/src/ai_worker/docker/bringup_control_ui/run.sh

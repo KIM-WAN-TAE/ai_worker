@@ -99,7 +99,9 @@ ARG ROS2_SERVICES="ai_worker_bringup avatar_bringup"
 # Copy all ROS2 service directories directly to s6-rc.d
 COPY docker/s6-services/ /etc/s6-overlay/s6-rc.d/
 
-RUN chmod +x /etc/s6-overlay/s6-rc.d/bringup_control_ui/run
+RUN chmod +x \
+    /etc/s6-overlay/s6-rc.d/bringup_control_ui/run \
+    /etc/s6-overlay/s6-rc.d/intervention_controller/run
 
 # Setup ROS2 services with logging pipeline and permissions
 RUN for service in ${ROS2_SERVICES}; do \
@@ -123,9 +125,11 @@ RUN chmod +x /usr/local/lib/s6-services/ros2_service_run.sh /usr/local/lib/s6-se
 COPY docker/bringup_control_ui/ai_worker_control /usr/local/bin/ai_worker_control
 RUN chmod +x /usr/local/bin/ai_worker_control
 
-# Robot hardware and web control services remain operator-started.
+# Intervention safety is a platform service. Robot hardware and the optional
+# LAN-facing control UI remain operator-started.
 RUN mkdir -p /etc/s6-overlay/s6-rc.d/user/contents.d && \
-    touch /etc/s6-overlay/s6-rc.d/user/contents.d/s6-agent
+    touch /etc/s6-overlay/s6-rc.d/user/contents.d/s6-agent \
+          /etc/s6-overlay/s6-rc.d/user/contents.d/intervention_controller
 
 # Set s6-overlay as entrypoint
 ENTRYPOINT ["/init"]

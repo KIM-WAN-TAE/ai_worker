@@ -1,10 +1,10 @@
 import unittest
 
 try:
-    from .logic import FOLLOWER_MODELS, LEADER_MODELS, SafetyState, diagnose_lines, gate_action, operating_mode, parse_s6_status
+    from .logic import FOLLOWER_MODELS, LEADER_MODELS, SafetyState, diagnose_lines, gate_action, gate_intervention_reset, gate_intervention_start, operating_mode, parse_s6_status
     from .recovery_config import default_config_path, load_recovery_groups
 except ImportError:
-    from logic import FOLLOWER_MODELS, LEADER_MODELS, SafetyState, diagnose_lines, gate_action, operating_mode, parse_s6_status
+    from logic import FOLLOWER_MODELS, LEADER_MODELS, SafetyState, diagnose_lines, gate_action, gate_intervention_reset, gate_intervention_start, operating_mode, parse_s6_status
     from recovery_config import default_config_path, load_recovery_groups
 
 
@@ -93,6 +93,63 @@ class SafetyGateTest(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertTrue(any("감시 토픽" in item for item in result.failures))
 
+    def test_intervention_requires_confirmed_paused_inference(self):
+        running = gate_intervention_start(
+            self.healthy_f2(inference_present=True),
+            "INFERENCING",
+        )
+        self.assertFalse(running.ok)
+        self.assertTrue(any("PAUSED" in item for item in running.failures))
+
+        paused = gate_intervention_start(
+            self.healthy_f2(inference_present=True),
+            "PAUSED",
+        )
+        self.assertTrue(paused.ok)
+
+    def test_intervention_rejects_recent_policy_command(self):
+        result = gate_intervention_start(
+            self.healthy_f2(
+                inference_present=True,
+                command_stream_active=True,
+            ),
+            "PAUSED",
+        )
+        self.assertFalse(result.ok)
+        self.assertTrue(any("최근 trajectory" in item for item in result.failures))
+
+    def test_intervention_is_limited_to_validated_f2_profile(self):
+        result = gate_intervention_start(
+            self.healthy_f2(inference_present=True, selected_follower="sg2"),
+            "PAUSED",
+        )
+        self.assertFalse(result.ok)
+        self.assertTrue(any("F2 + A3" in item for item in result.failures))
+
+    def test_faulted_intervention_can_reset_only_after_outputs_are_quiet(self):
+        allowed = gate_intervention_reset(
+            "PAUSED_SAFE",
+            leader_up=False,
+            command_recent=False,
+            recording_phase="READY",
+        )
+        self.assertTrue(allowed.ok)
+
+        for overrides in (
+            {"phase": "READY"},
+            {"leader_up": True},
+            {"command_recent": True},
+            {"recording_phase": "RECORDING"},
+        ):
+            values = {
+                "phase": "READY_TO_RESUME",
+                "leader_up": False,
+                "command_recent": False,
+                "recording_phase": "READY",
+            }
+            values.update(overrides)
+            self.assertFalse(gate_intervention_reset(**values).ok)
+
 
 class DiagnosticsTest(unittest.TestCase):
     def test_diagnostics_are_deduplicated(self):
@@ -134,6 +191,17 @@ class RecoveryConfigTest(unittest.TestCase):
 
 
 class OperatingModeTest(unittest.TestCase):
+    def test_intervention_is_not_reported_as_runtime_conflict(self):
+        mode = operating_mode(
+            leader_up=True,
+            inference_present=True,
+            inference_active=True,
+            inference_phase="PAUSED",
+            intervention_active=True,
+        )
+        self.assertEqual(mode["name"], "intervention")
+        self.assertFalse(mode["conflict"])
+
     def test_leader_runtime_selects_teleop_mode(self):
         mode = operating_mode(leader_up=True, inference_present=False, inference_active=False)
         self.assertEqual(mode["name"], "teleop")
