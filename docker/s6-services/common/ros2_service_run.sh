@@ -210,6 +210,15 @@ if [ -f "${LAUNCH_ARGS_FILE}" ]; then
     echo "[${SERVICE_NAME}] Launch args: ${LAUNCH_ARGS}"
 fi
 
+# A valid Intervention lease must also isolate the A3 command publishers from
+# the final F2 controller topics. The web controller selects TELEOP only after
+# both remapped streams are fresh; without that explicit selection the arbiter
+# stays fail-closed in NONE.
+if [ "${SERVICE_NAME}" = "avatar_bringup" ] && [ "${INTERVENTION_HANDOFF}" = true ]; then
+    ROS2_CMD="${ROS2_CMD} left_trajectory_output_topic:=/intervention/teleop/arm_left right_trajectory_output_topic:=/intervention/teleop/arm_right"
+    echo "[${SERVICE_NAME}] Intervention hand-off: A3 outputs routed through command-source arbiter."
+fi
+
 # Execute the ROS2 command
 # Using 'exec' ensures the command becomes PID 1 of this service,
 # which allows s6 to properly signal it and its children

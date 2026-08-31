@@ -338,6 +338,9 @@ def generate_launch_description():
         executable='command_source_arbiter',
         name='command_source_arbiter',
         output='screen',
+        # The Intervention controller owns the safety lease and s6 lifecycle.
+        # The arbiter only owns command routing and readiness validation.
+        parameters=[{'manage_leader_service': False}],
     )
 
     dual_laser_merger_node = Node(

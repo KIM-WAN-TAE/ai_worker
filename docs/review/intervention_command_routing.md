@@ -100,6 +100,30 @@ F2 follower launch는 `command_source_arbiter`를 함께 시작한다. A3와 pol
 topic을 사용하기 전에는 `NONE`을 유지해야 하며, source readiness가 확인된 뒤에만
 `POLICY` 또는 `TELEOP`을 선택한다.
 
+### validation에서 보완한 실제 hand-off
+
+추가 mock 통합 시험에서 A3 launch argument와 arbiter 서비스는 존재하지만,
+Intervention controller가 이를 실제 hand-off 순서에 연결하지 않은 공백을 확인했다.
+이 상태에서는 A3가 기존 최종 topic으로 직접 출력하거나 arbiter가 `NONE`에 남을 수
+있었다.
+
+`validation/f2-features`에서는 다음과 같이 연결했다.
+
+1. Intervention 안전 gate 통과 후 arbiter의 `prepare_intervention`을 호출한다.
+2. 유효한 일회성 s6 lease가 있을 때만 A3 출력을
+   `/intervention/teleop/arm_left|right`로 remap한다.
+3. A3 양팔 입력이 fresh pair가 된 뒤에만 `select_teleop`을 호출한다.
+4. end·abort·watchdog에서는 먼저 `select_none`으로 출력을 차단하고 Leader를
+   종료한 뒤 `disable_intervention`으로 상태를 정리한다.
+5. policy resume은 Cyclo가 fresh policy pair를 확인한 뒤 `select_policy`를 호출하는
+   기존 경로를 유지한다.
+
+Leader s6 lifecycle과 one-shot lease는 Intervention controller가 단독으로 소유한다.
+따라서 F2 launch에서는 arbiter의 `manage_leader_service`를 끄고, arbiter는 command
+routing과 readiness 검증만 담당한다. `prepare_intervention`은 latched fault를 자동으로
+지우지 않으며, fault가 있으면 명시적인 검토와 `clear_fault` 전까지 hand-off를
+거부한다.
+
 ## 상태와 서비스
 
 주요 서비스는 다음과 같다.
@@ -133,6 +157,19 @@ topic을 사용하기 전에는 `NONE`을 유지해야 하며, source readiness�
 - fault clear 전 자동 재개하지 않는지 확인
 - 좌우 pair skew를 거부하는지 확인
 - OMX `OBSERVER` mode나 관련 service가 남아 있지 않은지 확인
+- 유효한 Intervention lease에서만 A3 출력이 teleop 입력으로 remap되는지 확인
+- mock ROS graph에서 `NONE → TELEOP → NONE → POLICY → NONE` 전환과 실제 message
+  차단·전달을 확인
+- latched fault가 `prepare_intervention`으로 자동 해제되지 않는지 확인
+- arbiter가 `rclpy.Node` 내부 subscription 상태를 덮어쓰지 않고 정상 종료되는지 확인
+
+mock ROS graph 검사는 network가 차단된 일회성 컨테이너에서 다음 script로 수행한다.
+
+```text
+ffw_bringup/test/mock_intervention_handoff.py
+```
+
+이 검사는 실제 controller나 DYNAMIXEL에 연결하지 않고 mock topic만 사용한다.
 
 ## 안전 수준과 남은 제한
 

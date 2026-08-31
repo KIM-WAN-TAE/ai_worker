@@ -29,6 +29,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool
+from std_srvs.srv import Trigger
 from trajectory_msgs.msg import JointTrajectory
 
 try:
@@ -326,6 +327,15 @@ class BringupMonitor(Node):
         if RtcStatus is not None:
             for backend in ("groot", "lerobot"):
                 self.create_subscription(RtcStatus, f"/{backend}/rtc_status", lambda m, b=backend: self._rtc(b, m), reliable)
+        self.arbiter_clients = {
+            action: self.create_client(Trigger, f"/command_source_arbiter/{action}")
+            for action in (
+                "prepare_intervention",
+                "select_none",
+                "select_teleop",
+                "disable_intervention",
+            )
+        }
         self.create_timer(1.0, self._refresh_graph)
         self.create_timer(0.2, self._operation_watchdog)
 
@@ -409,6 +419,34 @@ class BringupMonitor(Node):
     def event(self, level: str, message: str) -> None:
         with self.lock:
             self.events.appendleft({"time": utc_now(), "level": level, "message": message})
+
+    def call_arbiter(self, action: str, timeout: float = 2.0) -> tuple[bool, str]:
+        """Call one arbiter Trigger service while the ROS executor keeps spinning."""
+        client = self.arbiter_clients[action]
+        if not client.wait_for_service(timeout_sec=timeout):
+            return False, f"command-source arbiter service unavailable: {action}"
+        completed = threading.Event()
+        result: dict[str, Any] = {}
+        future = client.call_async(Trigger.Request())
+
+        def done_callback(done_future) -> None:
+            try:
+                result["response"] = done_future.result()
+            except Exception as exc:
+                result["error"] = str(exc)
+            finally:
+                completed.set()
+
+        future.add_done_callback(done_callback)
+        if not completed.wait(timeout):
+            future.cancel()
+            return False, f"command-source arbiter call timeout: {action}"
+        if "error" in result:
+            return False, f"command-source arbiter call failed: {result['error']}"
+        response = result.get("response")
+        if response is None:
+            return False, f"command-source arbiter returned no response: {action}"
+        return bool(response.success), str(response.message)
 
     def ros_snapshot(self) -> dict[str, Any]:
         with self.lock:
@@ -732,6 +770,35 @@ def change_service(role: str, up: bool) -> None:
         _service_cache = (0.0, {})
 
 
+def require_arbiter_action(
+    action: str,
+    *,
+    timeout: float = 2.0,
+    retry_readiness: bool = False,
+) -> str:
+    """Require one command-routing transition or stop the hand-off."""
+    deadline = monotonic() + timeout
+    last_message = "not attempted"
+    while True:
+        remaining = max(0.05, deadline - monotonic())
+        success, message = node.call_arbiter(action, timeout=min(1.0, remaining))
+        if success:
+            return message
+        last_message = message
+        if not retry_readiness or monotonic() >= deadline:
+            break
+        if "fault latched" in message or "publisher conflict" in message:
+            break
+        time.sleep(0.05)
+    raise RuntimeError(f"command-source arbiter {action} 실패: {last_message}")
+
+
+def best_effort_arbiter_action(action: str) -> None:
+    success, message = node.call_arbiter(action, timeout=1.0)
+    if not success:
+        node.event("danger", f"command-source arbiter {action} 확인 실패: {message}")
+
+
 def create_intervention_preflight_lease(model: str) -> str:
     """Create a short-lived, one-shot exception for the s6 Leader preflight."""
     clear_intervention_preflight_lease()
@@ -850,8 +917,10 @@ def intervention_watchdog_loop() -> None:
                 str(current.get("leader_model", "")),
             )
             announced = True
+            best_effort_arbiter_action("select_none")
             if snapshot["services"]["leader"]["managed"]:
                 change_service("leader", False)
+            best_effort_arbiter_action("disable_intervention")
             intervention.transition("PAUSED_SAFE", error)
             node.event("danger", f"Intervention watchdog 안전 차단: {error}")
         except Exception as exc:
@@ -988,6 +1057,7 @@ def intervention_action(
             coordinator.announce("intervention_start", actor, model)
             announced = True
             intervention.begin(actor, model)
+            require_arbiter_action("prepare_intervention")
             LEADER_TYPE_FILE.write_text(model + "\n", encoding="utf-8")
             lease_nonce = create_intervention_preflight_lease(model)
             try:
@@ -1020,6 +1090,11 @@ def intervention_action(
                 or not ready["safety"]["dxl_ok"]
             ):
                 raise RuntimeError("Leader 준비 중 안전 상태가 변경되어 조작권 전환을 중단했습니다.")
+            require_arbiter_action(
+                "select_teleop",
+                timeout=5.0,
+                retry_readiness=True,
+            )
             intervention.transition("READY")
             node.event("warning", f"Intervention 조작권을 {LEADER_MODELS[model]['label']} Leader로 전환 · {actor}")
 
@@ -1030,6 +1105,7 @@ def intervention_action(
             coordinator.announce("intervention_end", actor, str(current.get("leader_model", "")))
             announced = True
             intervention.transition("RETURNING")
+            require_arbiter_action("select_none")
             snapshot = build_snapshot()
             if snapshot["safety"]["leader_runtime_active"] and not snapshot["services"]["leader"]["managed"]:
                 raise RuntimeError("Leader가 UI 밖에서 실행되어 안전하게 종료할 수 없습니다.")
@@ -1041,6 +1117,7 @@ def intervention_action(
             )
             if quiet["safety"]["leader_runtime_active"] or quiet["safety"]["command_recent"]:
                 raise RuntimeError("Leader 종료 후 command quiet 상태를 확인하지 못했습니다.")
+            require_arbiter_action("disable_intervention")
             intervention.transition("READY_TO_RESUME")
             node.event("warning", f"Intervention Leader 종료, Inference Resume 대기 · {actor}")
 
@@ -1069,6 +1146,7 @@ def intervention_action(
                 str(current.get("leader_model", "")),
             )
             announced = True
+            require_arbiter_action("disable_intervention")
             intervention.clear()
             node.event("warning", f"Intervention 종료, 새 Inference 시작 대기 · {actor}")
 
@@ -1078,6 +1156,7 @@ def intervention_action(
                 return {"ok": True, **intervention.snapshot()}
             coordinator.announce("intervention_end", actor, str(current.get("leader_model", "")))
             announced = True
+            best_effort_arbiter_action("select_none")
             snapshot = build_snapshot()
             if snapshot["services"]["leader"]["managed"]:
                 change_service("leader", False)
@@ -1085,6 +1164,7 @@ def intervention_action(
                 lambda item: not item["safety"]["leader_runtime_active"] and not item["safety"]["command_recent"],
                 10.0,
             )
+            best_effort_arbiter_action("disable_intervention")
             intervention.transition("PAUSED_SAFE", "사용자 중단 — Inference는 자동 재개하지 않았습니다.")
             node.event("danger", f"Intervention 안전 중단, Inference PAUSED 유지 · {actor}")
 
@@ -1094,12 +1174,14 @@ def intervention_action(
         error = str(exc.detail) if isinstance(exc, HTTPException) else str(exc)
         current = intervention.snapshot()["current"]
         if current:
+            best_effort_arbiter_action("select_none")
             try:
                 snapshot = build_snapshot()
                 if snapshot["services"]["leader"]["managed"]:
                     change_service("leader", False)
             except Exception:
                 pass
+            best_effort_arbiter_action("disable_intervention")
             intervention.transition("PAUSED_SAFE", error)
         node.event("danger", f"Intervention {action} 실패 · {actor}: {error}")
         if isinstance(exc, HTTPException):

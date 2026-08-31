@@ -280,10 +280,10 @@ class CommandSourceArbiter(Node):
             arm: self.create_publisher(JointTrajectory, self._final_topics[arm], reliable)
             for arm in ARMS
         }
-        self._subscriptions = []
+        self._source_subscriptions = []
         for source in (MODE_POLICY, MODE_TELEOP):
             for arm in ARMS:
-                self._subscriptions.append(self.create_subscription(
+                self._source_subscriptions.append(self.create_subscription(
                     JointTrajectory,
                     self._source_topics[source][arm],
                     lambda msg, src=source, side=arm: self._source_callback(src, side, msg),
@@ -384,7 +384,12 @@ class CommandSourceArbiter(Node):
         return response
 
     def _prepare_intervention(self, _request, response):
-        self.core.clear_fault()
+        if self.core.fault:
+            response.success = False
+            response.message = f"fault latched: {self.core.fault}"
+            self._publish_status()
+            return response
+        self.core.select_none()
         self._intervention_enabled = True
         self._publish_intervention_mode()
         self._release_leader_arms()

@@ -1,4 +1,5 @@
 import math
+from types import SimpleNamespace
 
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
@@ -133,3 +134,21 @@ def test_pair_skew_is_rejected():
     success, message = core.select(MODE_POLICY, 1.04)
     assert not success
     assert "skew" in message
+
+
+def test_prepare_intervention_does_not_clear_a_latched_fault():
+    arbiter = object.__new__(CommandSourceArbiter)
+    arbiter.core = CommandSourceArbiterCore(JOINTS)
+    arbiter.core.latch_fault("operator review required")
+    published = []
+    arbiter._publish_status = lambda: published.append(True)
+    response = SimpleNamespace(success=None, message="")
+
+    result = CommandSourceArbiter._prepare_intervention(arbiter, None, response)
+
+    assert result is response
+    assert not response.success
+    assert response.message == "fault latched: operator review required"
+    assert arbiter.core.fault == "operator review required"
+    assert arbiter.core.mode == MODE_NONE
+    assert published == [True]
