@@ -45,8 +45,10 @@
 ### Intervention
 
 - 최종 양팔 controller topic은 `command_source_arbiter` 하나만 publish하도록 구성한다.
-- `NONE`, `POLICY`, `TELEOP`, `OBSERVER` source의 메시지 형식, freshness, 좌우 pair와
-  설치된 limit을 검사하고, 이상이 있으면 `NONE`으로 닫는다.
+- `NONE`, `POLICY`, `TELEOP` source의 메시지 형식, freshness, 좌우 pair와 설치된
+  limit을 검사하고, 이상이 있으면 `NONE`으로 닫는다.
+- OMX 오른손목 observer prototype은 최종 검토 범위에서 제외했으며, 현재 arbiter에는
+  `OBSERVER` mode와 `select_observer` 서비스가 없다.
 - inference와 A3 사이의 전환 순서, 교정 구간 녹화와 episode 번호 동기화를 포함한다.
 - 구현과 비구동 검증은 되어 있지만, powered Intervention 완료 기능으로 승인된 상태는
   아니다.
