@@ -684,7 +684,19 @@ rclpy.init()
 node = MotionInspector()
 executor = SingleThreadedExecutor()
 executor.add_node(node)
-ros_thread = threading.Thread(target=executor.spin, name="ros2-executor", daemon=True)
+
+
+def spin_ros() -> None:
+    try:
+        executor.spin()
+    except Exception:
+        # SIGINT/SIGTERM can invalidate the ROS context before FastAPI runs its
+        # shutdown hook.  Suppress only that expected teardown race.
+        if rclpy.ok():
+            raise
+
+
+ros_thread = threading.Thread(target=spin_ros, name="ros2-executor", daemon=True)
 ros_thread.start()
 
 app = FastAPI(title="Task Motion Inspector")
@@ -778,4 +790,5 @@ def shutdown() -> None:
         node.stop_recording()
     executor.shutdown()
     node.destroy_node()
-    rclpy.shutdown()
+    if rclpy.ok():
+        rclpy.shutdown()
