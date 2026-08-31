@@ -37,6 +37,7 @@
 | --- | --- | --- |
 | `040bc60` | Review Docs | 제외된 `OBSERVER` 설명을 실제 arbiter mode와 일치시킴 |
 | `6cbfe3a` | Intervention | one-shot lease의 A3 출력을 teleop 입력으로 remap하고, controller가 arbiter의 prepare·TELEOP·NONE·disable 전환을 실제로 수행하도록 연결 |
+| `8e43111` | Review Docs | 격리 mock handoff와 validation test 결과를 기록 |
 
 ## 현재 기능 상태
 
@@ -122,6 +123,12 @@ topic을 사용했다.
 `1.5696 rad`였고, 추종 오차 약 `0.2505 rad`와 `HARD_LIMIT_SATURATION`이 표시됐다.
 runtime limit은 오른쪽 `[-1.363942, 1.570796] rad`, 왼쪽
 `[-1.570796, 1.363942] rad`로 해석됐다.
+
+같은 날의 후속 read-only 확인에서도 14개 arm joint는 fresh였고, arbiter는
+`NONE`, fault와 publisher conflict는 없었다. 좌우 최종 arm topic의 publisher는
+각각 하나였으며 모두 `command_source_arbiter`였다. DXL hardware error는 0이고
+torque가 켜진 ID는 없었다. 이 조건에서도 오른쪽 J7만
+`TRACKING_CRITICAL`, `OUTSIDE_DXL_RANGE`, `HARD_LIMIT_SATURATION`을 유지했다.
 
 이는 Motion Inspector가 알려진 J7 계약 불일치를 실제 신호에서 검출한다는 증거다.
 동시에 현재 active limit이 URDF·초기 자세 범위와 완전히 정렬된 것은 아니라는 뜻이다.
