@@ -4,6 +4,7 @@
 
 ```text
 [REVIEW] Motion Inspector: add read-only command and joint diagnostics
+[REVIEW] Motion Inspector: shut down cleanly after diagnostics
 ```
 
 ## 개발 배경
@@ -142,6 +143,8 @@ mirror·확장 limit을 적용했던 시점의 값과 화면을 포함해 현재
 - Python·JavaScript·shell 문법 검사
 - 실행 중 container에서 진단 logic 단위 테스트
 - 기존 MCAP 세션을 `--no-write`로 재분석해 JSON summary 생성 확인
+- 별도 subscriber-only 인스턴스를 `SIGTERM`으로 종료했을 때 ROS context 중복 shutdown
+  오류 없이 정리되는지 확인
 
 ## 남은 제한
 
