@@ -71,7 +71,7 @@
 GitHub의 `review/f2-features`를 `/tmp`에 새로 clone해, 기존 작업 폴더의 untracked 파일이나
 빌드 잔여물을 사용하지 않고 다음을 확인했다.
 
-- fresh clone HEAD `abc5919b40fb5054e07766e76ff9328463875e48`, clean worktree
+- fresh clone HEAD와 `origin/review/f2-features`가 일치하며 worktree가 clean인 상태
 - Motion Inspector 단위 테스트 `10/10` 통과
 - Python·shell·Compose 설정 검사 통과
 - Motion Inspector 경로에 command publisher, `ros2 bag play`, replay API가 없음
