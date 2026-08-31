@@ -1,10 +1,10 @@
-# AI Worker F2 기능 검토 브랜치 안내
+# AI Worker F2 기능 검토·검증 브랜치 안내
 
 ## 문서 목적
 
-이 문서는 `review/f2-features` 브랜치에 모은 변경을 매니저가 기능 단위로 검토할 수
-있도록 정리한 진입점이다. 각 기능의 개발 배경, 주요 코드, 검증 결과와 남은 제한은
-아래의 상세 문서로 연결한다.
+이 문서는 `review/f2-features`에 모은 변경과 `validation/f2-features`의 후속 수정을
+매니저가 기능 단위로 검토할 수 있도록 정리한 진입점이다. 각 기능의 개발 배경,
+주요 코드, 검증 결과와 남은 제한은 아래의 상세 문서로 연결한다.
 
 이 브랜치는 개인 저장소 `ukh0415/ai_worker_intern`에서 검토하기 위한 브랜치다. 원본
 저장소의 `main`에 반영됐거나 production 배포가 승인됐다는 의미가 아니다.
@@ -15,8 +15,9 @@
 | --- | --- |
 | 개인 저장소 | `git@github.com:ukh0415/ai_worker_intern.git` |
 | 검토 브랜치 | `review/f2-features` |
+| 검증 브랜치 | `validation/f2-features` |
 | 기능 분리 전 기준 | `78f3126` (`feature-intern`) |
-| 커밋 접두어 | `[REVIEW]` |
+| 커밋 접두어 | `[REVIEW]`, `[VALIDATION]` |
 
 ## 기능별 커밋
 
@@ -29,6 +30,13 @@
 | `9289b22` | Docker Workflow | AI Worker 셸 별칭을 단일 파일로 관리하고 개발 컨테이너에 read-only로 연결 | [Docker Workflow](./docker_workflow.md) |
 | `abc5919` | F2 Safety | base·smooth Xacro의 오른쪽 J7 active endpoint를 mirror 관계로 복구하고, Motion Inspector·문서·시각자료를 같은 기준으로 정렬 | [J7 위치 제한 오류](./f2_j7_position_limit_error.md) |
 | `e52cf80` | Motion Inspector | `SIGINT`·`SIGTERM` 종료 시 ROS context 중복 shutdown 오류를 남기지 않도록 정리 | [Motion Inspector](./motion_inspector.md) |
+
+## validation 후속 커밋
+
+| 커밋 | 큰 기능 | 포함 내용 |
+| --- | --- | --- |
+| `040bc60` | Review Docs | 제외된 `OBSERVER` 설명을 실제 arbiter mode와 일치시킴 |
+| `6cbfe3a` | Intervention | one-shot lease의 A3 출력을 teleop 입력으로 remap하고, controller가 arbiter의 prepare·TELEOP·NONE·disable 전환을 실제로 수행하도록 연결 |
 
 ## 현재 기능 상태
 
@@ -50,8 +58,9 @@
 - OMX 오른손목 observer prototype은 최종 검토 범위에서 제외했으며, 현재 arbiter에는
   `OBSERVER` mode와 `select_observer` 서비스가 없다.
 - inference와 A3 사이의 전환 순서, 교정 구간 녹화와 episode 번호 동기화를 포함한다.
-- 구현과 비구동 검증은 되어 있지만, powered Intervention 완료 기능으로 승인된 상태는
-  아니다.
+- validation에서 누락돼 있던 A3 output remap과 `select_teleop` 호출을 연결했다.
+- 격리 mock ROS graph에서는 `NONE → TELEOP → NONE → POLICY → NONE` 전환과 message
+  차단·전달이 통과했지만, powered Intervention 완료 기능으로 승인된 상태는 아니다.
 
 ### Motion Inspector
 
@@ -87,6 +96,25 @@ GitHub의 `review/f2-features`를 `/tmp`에 새로 clone해, 기존 작업 폴�
 
 검증 과정에서 fresh clone은 로봇 명령을 발행하지 않았다. F2 bring-up과 controller는
 사용자가 미리 실행한 기존 runtime을 그대로 읽었다.
+
+## 2026-08-31 validation 브랜치 추가 검증
+
+추가 검사는 network를 차단하고 source를 read-only로 mount한 일회성 컨테이너와 mock
+topic을 사용했다.
+
+- Bring-up Control UI, Motion Inspector, arbiter와 foot-switch Python test `52/52` 통과
+- `ffw_description`, `ffw_bringup`,
+  `ffw_joint_trajectory_command_broadcaster` 격리 build 통과
+- colcon test `18/18` 통과
+- `mock_intervention_handoff.py`에서
+  `NONE → TELEOP → NONE → POLICY → NONE` 전환 통과
+- `NONE` 중 A3 message가 최종 topic으로 전달되지 않고, TELEOP·POLICY 선택 후 해당
+  fresh pair만 전달되는 것을 확인
+- latched fault 자동 해제 방지와 arbiter 정상 `destroy_node()` 종료 확인
+- Python·shell·Compose와 diff whitespace 검사 통과
+
+이 결과는 command routing의 비구동 통합 증거다. 실제 A3, controller와 DYNAMIXEL을
+사용한 takeover continuity나 powered 안전성을 증명하지 않는다.
 
 ## live 확인에서 다시 관찰된 J7 상태
 
