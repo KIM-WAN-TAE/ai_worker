@@ -31,8 +31,8 @@ ROBOT_DESCRIPTION = """
       <param name="Min Position Limit">-262144</param>
     </gpio>
     <gpio name="dxl7">
-      <param name="Max Position Limit">131875</param>
-      <param name="Min Position Limit">-151875</param>
+      <param name="Max Position Limit">151875</param>
+      <param name="Min Position Limit">-131875</param>
     </gpio>
     <gpio name="dxl37">
       <param name="Max_Position_Limit">131875</param>
@@ -49,11 +49,11 @@ class MotionLogicTest(unittest.TestCase):
 
     def test_runtime_description_updates_current_j7_limits(self):
         limits = parse_f2_limits(ROBOT_DESCRIPTION)
-        self.assertEqual(limits["arm_r_joint7"]["ticks"], [-151875, 131875])
+        self.assertEqual(limits["arm_r_joint7"]["ticks"], [-131875, 151875])
         self.assertEqual(limits["arm_l_joint7"]["ticks"], [-151875, 131875])
         self.assertAlmostEqual(
             limits["arm_r_joint7"]["hardware"][1],
-            131875 * PH42_RAD_PER_TICK,
+            151875 * PH42_RAD_PER_TICK,
         )
         self.assertEqual(
             limits["arm_r_joint7"]["source"],

@@ -76,24 +76,25 @@ gripper 해제: above 상태 확인
 `607500 tick/rev`다. 기존 limit 값 `[-151875, 131875]`는 Y 계열의
 `524288 tick/rev`로 왼팔 URDF를 환산한 값과 거의 정확히 일치한다.
 
-또한 좌우 URDF는 mirror 관계지만 기존 F2 설정에는 양쪽 J7에 같은 raw limit이 들어가
-있다. 그 결과 기존 DXL 범위는 실제 PH42 기준으로 양쪽 모두
-`[-90.00°, +78.15°]`가 되고, 오른팔 upper는 URDF보다 약 `26.14°` 좁다.
+또한 좌우 URDF는 mirror 관계지만 이전 F2 설정에는 양쪽 J7에 같은 raw limit이 들어가
+있었다. 이 좌우 복사 오류는 현재 검토 소스에서 바로잡아 오른팔과 왼팔의 active endpoint를
+서로 대칭으로 맞췄다. 다만 PH42 분해능 오류는 manager 확인 전까지 그대로 남아 있어,
+좌우 모두 URDF보다 약 `12.40°`와 `14.28°`씩 좁다.
 
 원인과 영향은 [J7 위치 제한 설정 오류](./f2_j7_position_limit_error.md)에 시각 자료와
 함께 정리했다.
 
 ### 현재 적용 상태
 
-활성값은 기존 F2 값을 그대로 유지한다.
+활성값은 좌우 복사 오류만 바로잡고, 아직 승인되지 않은 PH42 환산은 적용하지 않는다.
 
 ```text
-오른팔 ID 7 : [-151875, 131875] tick
+오른팔 ID 7 : [-131875, 151875] tick
 왼팔 ID 37  : [-151875, 131875] tick
 ```
 
-PH42 분해능으로 URDF 범위를 포함하도록 계산한 다음 값은 기본 Xacro의 XML 주석으로만
-남긴다.
+PH42 분해능으로 URDF 범위를 포함하도록 계산한 다음 값은 기본·smooth Xacro의 XML
+주석으로만 남긴다.
 
 ```text
 오른팔 ID 7 후보 : [-152804, 175980] tick
@@ -108,7 +109,7 @@ PH42 분해능으로 URDF 범위를 포함하도록 계산한 다음 값은 기�
 - 설치된 ID 7·37의 EEPROM Min/Max/Homing Offset read-back
 - torque-off 상태의 실제 기구 가동 범위
 - 카메라, 케이블, cover, gripper 및 양팔 간섭 여부
-- 기본 Xacro와 smooth Xacro를 같은 기준으로 변경할지 여부
+- 기본 Xacro와 smooth Xacro가 계속 같은 active·후보 기준을 유지하는지 확인
 - 새 범위가 기존 dataset/checkpoint 계약에 미치는 영향
 
 ## 검증 수준과 제한

@@ -26,8 +26,9 @@ position 분해능은 `607500 tick/rev`이지만, 기존 J7 limit 값은 Y 계�
 2. **좌우 복사 오류:** 좌우 J7의 URDF 범위는 서로 mirror 관계인데, 왼팔용 raw limit이
    오른팔에도 동일하게 들어가 오른팔 양의 방향 오차가 특히 커졌다.
 
-현재 production 기준값은 manager 확인 전까지 변경하지 않는다. 실제 PH42 분해능으로
-계산한 값은 소스의 주석과 이 문서에 **수정 후보**로만 남긴다.
+현재 검토 소스에서는 좌우 복사 오류만 바로잡아 active endpoint를 mirror 관계로
+복구했다. 실제 PH42 분해능으로 계산한 값은 manager 확인 전까지 활성화하지 않고,
+기본·smooth Xacro의 주석과 이 문서에 **수정 후보**로만 남긴다.
 
 ![J7 오류 발생 흐름](./assets/f2_j7/J7_ROOT_CAUSE_FLOW.png)
 
@@ -40,7 +41,7 @@ position 분해능은 `607500 tick/rev`이지만, 기존 J7 limit 값은 Y 계�
 | 확인된 모델 | `PH42-020-S300-R` | `PH42-020-S300-R` |
 | 모델 번호 | `2000` | `2000` |
 | 실제 분해능 | `607500 tick/rev` | `607500 tick/rev` |
-| 기존 활성 limit | `[-151875, 131875] tick` | `[-151875, 131875] tick` |
+| 현재 active limit | `[-131875, 151875] tick` | `[-151875, 131875] tick` |
 
 설정 파일은 다음과 같다.
 
@@ -124,24 +125,25 @@ Drive Mode의 방향 반전은 명령의 회전 방향을 바꾸지만, 서로 �
 자동으로 교환하거나 `524288`과 `607500`의 분해능 차이를 보정하지 않는다. 현재 F2
 설정에도 이 차이를 보정하는 별도 transmission scale은 없다.
 
-## URDF 범위와 기존 DXL 범위 비교
+## URDF 범위와 현재 active DXL 범위 비교
 
-![좌우 J7 URDF와 기존 DXL 범위 비교](./assets/f2_j7/J7_WRIST_RANGE_HANDS.png)
+![좌우 J7 URDF와 현재 active DXL 범위 비교](./assets/f2_j7/J7_WRIST_RANGE_HANDS.png)
 
 [J7 URDF·DXL 범위 대화형 시각화 열기](./assets/f2_j7/J7_URDF_DXL_RANGE_VISUALIZATION.html)
 
 HTML 시각화는 GitHub 미리보기에서 실행되지 않을 수 있다. 이 경우 파일을 내려받아
 브라우저에서 열면 좌우 범위와 endpoint 차이를 확인할 수 있다.
 
-| 관절과 방향 | URDF endpoint | 기존 DXL endpoint | 부족한 범위 |
+| 관절과 방향 | URDF endpoint | 현재 active DXL endpoint | 부족한 범위 |
 | --- | ---: | ---: | ---: |
-| 오른팔 J7 lower | `-1.5804 rad` | `-1.570796 rad` | 약 `0.55°` |
-| 오른팔 J7 upper | `1.8201 rad` | `1.363942 rad` | 약 `26.14°` |
+| 오른팔 J7 lower | `-1.5804 rad` | `-1.363942 rad` | 약 `12.40°` |
+| 오른팔 J7 upper | `1.8201 rad` | `1.570796 rad` | 약 `14.28°` |
 | 왼팔 J7 lower | `-1.8201 rad` | `-1.570796 rad` | 약 `14.28°` |
 | 왼팔 J7 upper | `1.5804 rad` | `1.363942 rad` | 약 `12.40°` |
 
-오른팔만 잘못된 것은 아니다. 양쪽 모두 PH42 분해능 불일치로 URDF보다 DXL 범위가
-좁다. 다만 좌우 복사 오류까지 겹친 오른팔 upper의 차이가 약 `26.14°`로 가장 크다.
+현재 active 값은 좌우 복사 오류를 제거했으므로 부족한 범위도 서로 mirror 관계다. 다만
+양쪽 모두 PH42 분해능 불일치가 남아 있어 URDF보다 DXL 범위가 좁다. 앞 절의
+`26.14°`는 mirror 복구 전 오른팔 upper에서 나타났던 과거 오차다.
 
 ## 실제로 나타나는 문제
 
@@ -172,8 +174,8 @@ F2 초기 자세 설정의 오른팔 J7 `step1`은 `1.8201 rad`를 요구한다.
 
 ```text
 요청한 오른팔 J7 = 1.8201 rad
-기존 DXL hard max = 1.363942 rad
-차이              = 0.456158 rad ≈ 26.14°
+현재 active DXL hard max = 1.570796 rad
+차이                    = 0.249304 rad ≈ 14.28°
 ```
 
 즉, 상위 초기 자세 설정 자체가 기존 오른팔 J7 DXL limit 밖의 값을 요구한다. 초기 자세
@@ -209,19 +211,20 @@ EEPROM limit을 넓히면 기존 hard limit이 막고 있던 영역으로 실제
 
 ## 현재 소스 상태
 
-Manager 확인 전까지 활성값은 기존 F2 설정으로 유지한다.
+현재 active 값은 좌우 복사 오류만 바로잡고, Y 계열 분해능으로 계산된 기존 폭은
+유지한다.
 
 ```xml
 <!-- 오른팔 ID 7: 현재 활성값 -->
-<param name="Max Position Limit">131875</param>
-<param name="Min Position Limit">-151875</param>
+<param name="Max Position Limit">151875</param>
+<param name="Min Position Limit">-131875</param>
 
 <!-- 왼팔 ID 37: 현재 활성값 -->
 <param name="Max Position Limit">131875</param>
 <param name="Min Position Limit">-151875</param>
 ```
 
-기본 F2 Xacro에는 PH42 계산 결과를 다음처럼 주석 후보로만 남긴다.
+기본·smooth F2 Xacro에는 PH42 계산 결과를 다음처럼 주석 후보로만 남긴다.
 
 ```xml
 <!-- 오른팔 ID 7: 미승인 후보 -->
@@ -249,13 +252,13 @@ Manager 확인 전까지 활성값은 기존 F2 설정으로 유지한다.
 - torque-off 상태의 실제 기구 가동 범위
 - 손목 카메라, 케이블, gripper, cover 및 반대쪽 팔과의 간섭
 - endpoint 접근 시 current와 Hardware Error Status
-- 기본 Xacro와 smooth Xacro를 같은 기준으로 변경할지 여부
+- 기본 Xacro와 smooth Xacro가 계속 같은 active·후보 기준을 유지하는지 확인
 - 기존 dataset/checkpoint를 유지할지, 새 범위에서 데이터를 다시 수집할지 여부
 
 ## 짧게 설명하면
 
 > F2 J7은 실제로 PH42 모터라서 한 바퀴가 607500 tick인데, 기존 limit은 다른 팔
 > 관절에 사용하는 Y 계열의 524288 tick 기준으로 계산돼 있었습니다. 여기에 왼팔용
-> endpoint가 오른팔에도 복사되어 오른팔은 URDF가 허용하는 양의 방향보다 약 26도 먼저
-> DXL limit에 도달합니다. PH42 기준 후보값은 계산했지만, 기구와 케이블 안전 확인을 받지
-> 않았기 때문에 기존값은 유지하고 후보만 주석과 문서에 남겼습니다.
+> endpoint가 오른팔에도 복사되어 오른팔의 양의 방향 오차가 특히 컸습니다. 현재 검토
+> 소스에서는 좌우 복사만 바로잡았고, PH42 기준 후보값은 기구와 케이블 안전 확인을 받지
+> 않았기 때문에 활성화하지 않은 채 주석과 문서에 남겼습니다.

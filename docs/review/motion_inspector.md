@@ -70,8 +70,9 @@ runtime `/robot_description`에서 URDF lower·upper와 ros2_control의 Min·Max
 읽어 비교한다. 이 값은 설정 snapshot이지 DXL EEPROM read-back이 아니다.
 
 runtime description이 도착하기 전 fallback은 이번 검토 브랜치의 active 보수 값과
-일치시켰다. 특히 좌우 J7 모두 active tick 범위 `[-151875, 131875]`를 사용한다. PH42
-해상도로 계산한 확장 후보는 표시·분석 코드에 자동 적용하지 않는다.
+일치시켰다. 오른쪽 J7은 `[-131875, 151875]`, 왼쪽 J7은
+`[-151875, 131875]` tick을 사용한다. PH42 해상도로 계산한 확장 후보는 표시·분석
+코드에 자동 적용하지 않는다.
 
 ## 진단 규칙
 

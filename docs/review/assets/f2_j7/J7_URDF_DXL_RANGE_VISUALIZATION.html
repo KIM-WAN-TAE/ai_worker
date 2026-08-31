@@ -410,7 +410,7 @@
     <div>
       <p class="eyebrow">AI WORKER · F2 FOLLOWER · J7</p>
       <h1>URDF는 허용하지만, 현재 DXL은 막는다</h1>
-      <p class="subtitle">양쪽 모두 가동 폭이 줄었고, 좌우 mirror 복사 오류 때문에 오른손 +방향 손실이 특히 크다.</p>
+      <p class="subtitle">좌우 mirror 복사는 바로잡았지만, PH42 분해능 환산 오류가 남아 양쪽 가동 폭은 여전히 좁다.</p>
     </div>
     <div class="view-badge">HEAD CAM VIEW&nbsp; · &nbsp;왼손 ← 화면 → 오른손</div>
   </header>
@@ -516,7 +516,7 @@
         <circle class="ring-urdf" cx="300" cy="219" r="154" pathLength="360"
                 stroke-dasharray="194.834 165.166" transform="rotate(75.716 300 219)"/>
         <circle class="ring-dxl" cx="300" cy="219" r="154" pathLength="360"
-                stroke-dasharray="168.148 191.852" transform="rotate(101.852 300 219)"/>
+                stroke-dasharray="168.148 191.852" transform="rotate(90 300 219)"/>
         <circle class="ring-outline" cx="300" cy="219" r="171" pathLength="360"
                 stroke-dasharray="194.834 165.166" transform="rotate(75.716 300 219)"/>
 
@@ -525,8 +525,8 @@
         <path class="dir-arrow" d="M 180 125 A 150 150 0 0 0 148 168" marker-end="url(#arrow-r)"/>
         <text class="arc-label" x="139" y="119">+ θ</text>
         <path d="M225 88 L294 67" fill="none" stroke="#a44e00" stroke-width="1.5"/>
-        <text class="loss-label" x="172" y="91">0.55°</text>
-        <text class="loss-label" x="300" y="373" text-anchor="middle">26.14°</text>
+        <text class="loss-label" x="172" y="91">12.40°</text>
+        <text class="loss-label" x="300" y="373" text-anchor="middle">14.28°</text>
 
         <g transform="translate(300 219) scale(-1 1)" filter="url(#soft-shadow-r)" aria-label="HX2-D1 계열 그리퍼 실루엣">
           <path class="grip-arm" d="M-176,-25 H-56 L-38,-35 H-8 V35 H-38 L-56,25 H-176 Z"/>
@@ -543,16 +543,16 @@
         </g>
 
         <text class="range-main" x="300" y="406" text-anchor="middle">DXL 밖 26.69°</text>
-        <text class="range-sub" x="300" y="424" text-anchor="middle">오른손은 손실 대부분이 +방향에 몰림</text>
+        <text class="range-sub" x="300" y="424" text-anchor="middle">좌우 active 범위는 서로 mirror 관계</text>
       </svg>
 
       <div class="loss-chips" aria-label="오른손 부족 범위">
-        <div class="chip">− 방향 부족 <strong>0.55°</strong></div>
-        <div class="chip critical">+ 방향 부족 <strong>26.14°</strong></div>
+        <div class="chip">− 방향 부족 <strong>12.40°</strong></div>
+        <div class="chip critical">+ 방향 부족 <strong>14.28°</strong></div>
       </div>
 
       <div class="range-table">
-        <div class="ruler" style="--u1:8.841%;--u2:97.402%;--d1:9.091%;--d2:85.522%;">
+        <div class="ruler" style="--u1:8.841%;--u2:97.402%;--d1:14.478%;--d2:90.909%;">
           <span class="urdf-band"></span><span class="dxl-band"></span>
         </div>
         <div class="range-row">
@@ -565,8 +565,8 @@
         <div class="range-row">
           <div class="row-name"><span class="swatch dxl"></span>현재 DXL</div>
           <div class="values">
-            <strong>−90.00° ↔ +78.15°</strong>
-            <small>−1.570796 ↔ +1.363942 rad · −151875 ↔ +131875 tick</small>
+            <strong>−78.15° ↔ +90.00°</strong>
+            <small>−1.363942 ↔ +1.570796 rad · −131875 ↔ +151875 tick</small>
           </div>
         </div>
       </div>
@@ -574,7 +574,7 @@
   </section>
 
   <section class="cause" aria-label="오류 발생 흐름">
-    <h2>두 문제가 겹친 과정</h2>
+    <h2>두 오류와 현재 검토 소스의 처리</h2>
     <div class="flow">
       <div class="flow-step">
         <span class="step-no">SOURCE</span>
@@ -591,13 +591,13 @@
       <div class="flow-step problem">
         <span class="step-no">문제 2 · MIRROR 복사</span>
         <strong>왼손 raw 값을 오른손에도 복사</strong>
-        <p>양쪽 모두 −151875 ↔ +131875 tick</p>
+        <p>과거에는 양쪽 모두 −151875 ↔ +131875 tick</p>
       </div>
       <div class="flow-arrow">→</div>
       <div class="flow-step result">
-        <span class="step-no">현재 PH42 해석</span>
-        <strong>양쪽 모두 −90.00° ↔ +78.15°</strong>
-        <p>오른손 URDF +104.28° 명령은 +26.14°만큼 DXL hard max를 넘어감</p>
+        <span class="step-no">현재 active · MIRROR 복구</span>
+        <strong>오른손 −78.15° ↔ +90.00°</strong>
+        <p>왼손은 −90.00° ↔ +78.15° · PH42 분해능 오류는 양쪽에 남음</p>
       </div>
     </div>
   </section>
