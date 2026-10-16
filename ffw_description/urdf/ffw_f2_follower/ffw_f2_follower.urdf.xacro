@@ -122,7 +122,16 @@
   <!-- Gazebo plugins/sensors -->
   <xacro:ffw_f2_follower_gazebo prefix="$(arg prefix)" />
 
-  <xacro:ffw_f_follower_body parent="$(arg prefix)base_link" prefix="$(arg prefix)">
+  <!-- F2 J7 limits use the nominal mechanism envelope. The PH42 EEPROM limits
+       include this range by rounding the raw endpoints outward. -->
+  <xacro:ffw_f_follower_body
+    parent="$(arg prefix)base_link"
+    prefix="$(arg prefix)"
+    arm_joint4_upper="1.0785802414820915"
+    arm_l_joint7_lower="-1.8201"
+    arm_l_joint7_upper="1.5804"
+    arm_r_joint7_lower="-1.5804"
+    arm_r_joint7_upper="1.8201">
     <origin xyz="-0.0753807 0 1.407" rpy="0 0 0" />
   </xacro:ffw_f_follower_body>
 

@@ -1,0 +1,221 @@
+{
+  "completed_at_utc": "2026-10-16T02:40:50.025210+00:00",
+  "status": "passed",
+  "automated_checks": {
+    "passed": 219,
+    "failed": 0,
+    "errors": 0,
+    "skipped": 0,
+    "suites": {
+      "ui_and_ros_integration_fast_dds": {
+        "tests": 170,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "passed": 170,
+        "report": "/home/robotis/ai_worker/docker/workspace/waypoint_refinement_check/verification-final-tests.xml"
+      },
+      "path_math": {
+        "tests": 19,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "passed": 19,
+        "report": "/home/robotis/ai_worker/docker/workspace/waypoint_refinement_check/verification-final-math-tests.xml"
+      },
+      "limit_aware_ik": {
+        "tests": 4,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "passed": 4,
+        "report": "/home/robotis/ai_worker/docker/workspace/waypoint_refinement_check/verification-final-ik-tests.xml"
+      },
+      "command_source_arbiter": {
+        "tests": 26,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "passed": 26,
+        "report": "/home/robotis/ai_worker/docker/workspace/waypoint_refinement_check/verification-final-arbiter-tests.xml"
+      }
+    }
+  },
+  "transport_compatibility": {
+    "fast_dds": "Final installed Release binary: all 170 UI and integration tests passed, including both real-reference tests.",
+    "zenoh": {
+      "tests": 170,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 1,
+      "passed": 169,
+      "report": "/home/robotis/ai_worker/docker/workspace/waypoint_refinement_check/main-final.xml"
+    }
+  },
+  "browser": {
+    "passed": true,
+    "javascript_errors": [],
+    "checks": [
+      "슬라이더·숫자 입력 동기화와 0/30/60/100% 선택",
+      "중간점 0개 입력",
+      "팔별 설정 격리와 JSON 불러오기",
+      "실행 중 설정 변경 차단",
+      "생성기·보간·구간 및 전체 목표시간 배정",
+      "데스크톱·390px 모바일 배치"
+    ],
+    "interaction_report": "/home/robotis/ai_worker/docker/reports/waypoint_refinement_20261016/browser-results.json",
+    "controls_screenshots": "/home/robotis/ai_worker/docker/reports/waypoint_refinement_validation_20261016-assets",
+    "javascript_vm_test": "passed",
+    "javascript_syntax": "passed"
+  },
+  "actual_493_point_reference": {
+    "legacy_generator_import_preview": "passed in final integration suite: full 1→493, local offset [1.0, -0.5, 0.75] mm, grasp waypoint 247",
+    "legacy_equal_time_offline": "passed in final integration suite",
+    "refinement": {
+      "passed": true,
+      "arm": "right",
+      "source_waypoints": 493,
+      "generated_joint_knots": 4921,
+      "generation_offset_mm": [
+        0.5,
+        -0.25,
+        0.5
+      ],
+      "refinement": {
+        "enabled": true,
+        "subdivisions": 10,
+        "smoothing_percent": 60,
+        "position_tolerance_mm": 1,
+        "orientation_tolerance_deg": 1,
+        "joint_tolerance_rad": 0.01,
+        "max_refinements": 8
+      },
+      "initial_validation": {
+        "stage": "success",
+        "attempt": 1,
+        "subdivisions": 10,
+        "segment_end_waypoint": 0,
+        "max_position_error_mm": 0.0376831894672,
+        "max_orientation_error_deg": 0.00295085120485,
+        "max_joint_error_rad": 0.000103470387763,
+        "smoothing_percent": 60,
+        "effective_smoothing_percent": 60,
+        "joint_subdivisions": 10,
+        "joint_intermediate_points": 9,
+        "knot_count": 4921,
+        "ik_searches": 0,
+        "ik_relaxed_solutions": 0,
+        "ik_min_margin_rad": -1,
+        "position_tolerance_mm": 1,
+        "orientation_tolerance_deg": 1,
+        "joint_tolerance_rad": 0.01,
+        "reason_code": "INFO",
+        "reason": "verified at 4x command density; fixed JOINT subdivisions; original waypoints and dwell preserved; initial alignment excluded"
+      },
+      "equal_time": {
+        "success": true,
+        "duration_s": 1.5,
+        "updated": 492,
+        "excluded": 0,
+        "max_error_s": 2.7284841053187847e-12,
+        "reference": "live_joint_state",
+        "verified": true,
+        "total_s": 739.6999999988851,
+        "target_total_s": 0.0,
+        "total_error_s": 0.0,
+        "alignment_s": 21.283568892114904,
+        "execution_total_s": 760.983568891,
+        "fixed_s": 0.0,
+        "mode": "segment",
+        "message": "시간 배정 검증 완료 · 492개 구간 각각 1.500000초 · 0개 제외 · 최대 오차 0.000000 ms · 현재 관절 상태 기준 시뮬레이션"
+      },
+      "final_validation": {
+        "stage": "success",
+        "attempt": 1,
+        "subdivisions": 10,
+        "segment_end_waypoint": 0,
+        "max_position_error_mm": 0.0281982995252,
+        "max_orientation_error_deg": 0.00185247240551,
+        "max_joint_error_rad": 8.1964486192e-05,
+        "smoothing_percent": 60,
+        "effective_smoothing_percent": 60,
+        "joint_subdivisions": 10,
+        "joint_intermediate_points": 9,
+        "knot_count": 4921,
+        "ik_searches": 0,
+        "ik_relaxed_solutions": 0,
+        "ik_min_margin_rad": -1,
+        "position_tolerance_mm": 1,
+        "orientation_tolerance_deg": 1,
+        "joint_tolerance_rad": 0.01,
+        "reason_code": "INFO",
+        "reason": "verified at 4x command density; fixed JOINT subdivisions; original waypoints and dwell preserved; initial alignment excluded"
+      },
+      "elapsed_s": 22.862619089999498,
+      "physical_robot_commands": 0
+    },
+    "report": "/home/robotis/ai_worker/docker/reports/waypoint_refinement_20261016/actual-reference-results.json"
+  },
+  "compatibility_checked": [
+    "기존 LINEAR·JOINT·JOINT 연속 통과",
+    "보간 해제 시 기존 Preview 일치",
+    "역순·혼합 경로 및 양팔 독립 상태",
+    "직접 관절·상대 및 절대 pose 입력",
+    "그리퍼·대기·속도·시작 정렬·slow start",
+    "기존 JSON 및 새 보간 설정 저장·불러오기",
+    "드릴 경로 생성기와 재불러오기",
+    "동일 구간 시간·전체 목표시간·제외 구간·실패 시 복원",
+    "실제 모의 ROS 스트림·키보드 deadman·양팔 순차 실행",
+    "준비·계획·실행 중 정지 및 TELEOP 복귀",
+    "허용 오차 초과 재시도·실제 강도 표시·실패 시 Preview 무효화·진단 원인"
+  ],
+  "fixed_during_validation": [
+    "보간을 끈 기존 경로에 새 IK 정책이 적용되어 경로가 바뀌는 문제",
+    "시작 직후 DDS 설정 topic 연결 전 발행 및 MODEL_READY를 설정 응답으로 오인하는 문제",
+    "독립 전송 프로세스 준비 중 TELEOP lease 타임아웃",
+    "전송·순차 실행 준비 중 STOP이 초기화되거나 TELEOP으로 복귀하는 문제",
+    "시간 배정 직후 polling 경합으로 잘못된 변경 경고가 나타나는 문제"
+  ],
+  "installation": {
+    "all_installed_files_match_source": true,
+    "files_sha256": {
+      "scripts/waypoint_telep_ui.py": "87e15445193af455c887f5ee69975b4cb684f4944c00395c3c03cefeef649675",
+      "scripts/waypoint_stream_worker.py": "e997f5853bfa0db7dbb91c48dfd7f1071960535d682e057ceb973359dd6ff427",
+      "web/app.js": "648b16dd09304d23b0baf85866f59cfc9729be9491c3ed24830621d2f7324033",
+      "web/index.html": "23601a258950c66a5229f0488bb752f6a619f390705bf0c245bda8d2c242fc3e",
+      "web/styles.css": "f84520c8b6eeacc504d71b56be9bcd526ff94b63a2064dfe48ed52c054892d7c",
+      "include/waypoint_telep/path_refinement.hpp": "f06965e700ee6952849648ed4ab3c78289010b8e3137915d6ec4904b25e0e5ea",
+      "include/waypoint_telep/limit_ik.hpp": "76ba3aad47c4f6683fad673a2b8502615b44fa03113e6759f2090afc0764a88a"
+    },
+    "binary": "/root/ros2_ws/build/waypoint_telep/waypoint_telep_node",
+    "binary_sha256": "c50bc6c702b447696306bc1ea1c056d34eff6a2eda9b65e0e7dc69aa66845ba7",
+    "build_type": "Release",
+    "running_services_restarted": false
+  },
+  "source_sha256": {
+    "src/waypoint_telep_node.cpp": "b8e150e986b34aae96aa6c88513b1deab7f57a9928160ece8c6d713cb911e90d",
+    "scripts/waypoint_telep_ui.py": "87e15445193af455c887f5ee69975b4cb684f4944c00395c3c03cefeef649675",
+    "include/waypoint_telep/path_refinement.hpp": "f06965e700ee6952849648ed4ab3c78289010b8e3137915d6ec4904b25e0e5ea",
+    "include/waypoint_telep/limit_ik.hpp": "76ba3aad47c4f6683fad673a2b8502615b44fa03113e6759f2090afc0764a88a",
+    "web/index.html": "23601a258950c66a5229f0488bb752f6a619f390705bf0c245bda8d2c242fc3e",
+    "web/app.js": "648b16dd09304d23b0baf85866f59cfc9729be9491c3ed24830621d2f7324033",
+    "web/styles.css": "f84520c8b6eeacc504d71b56be9bcd526ff94b63a2064dfe48ed52c054892d7c",
+    "test/test_ui_logic.py": "9cc7459140d7c5dfbb633a73d3bbeeadf3991de19a776585e6cf5a38103b6e00",
+    "test/test_mock_integration.py": "78332dccc73f99c4921ce7387b7298e3f290439696eb1d4c2a1e4ee016c58b25",
+    "test/test_limit_ik.cpp": "841688425f8b6778667959f8c9c4a4549af87f64241f7f9653e9539b118ab880",
+    "test/test_path_math.cpp": "5e88873cb2617f53ac939dd3cc020bc0800fe8550da719766b7314e848b95f27",
+    "test/test_refinement_ui.js": "8d02295a69e166dc54749fccda2356ebaff36110fccc59c16953c1c07e910543",
+    "CMakeLists.txt": "507be8153574feb2d3d650b3e8c48d197a4400a64ac4ade0893602b50119f149",
+    "README.md": "6b748794560c5ba5ac1d57e87aa0430b7cc13bf16810a791483611faf142aa46"
+  },
+  "verification_scope": {
+    "physical_robot_commands": 0,
+    "isolation": "ROS domain 229, localhost, mock robot feedback and mock action server",
+    "error_check": "실제 명령 샘플과 명령 밀도의 최소 4배 샘플에서 FK·관절 오차 검사. 첫 지점 정렬은 경로 오차 비교에서 제외하되 제한 검사는 적용.",
+    "not_validated": [
+      "실제 모터의 추종 오차",
+      "충돌 및 접촉 동작",
+      "연속 곡선 전체에 대한 수학적 오차 보증"
+    ]
+  }
+}

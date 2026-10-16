@@ -391,19 +391,20 @@ Cyclo inference 화면에 사람의 실패 교정 데이터를 안전하게 취�
 
 ```text
 INFERENCING
+  → (기존 inference recording은 종료하지 않고 유지)
   → STOP_INFERENCE / PAUSED 확인
   → 실제 trajectory command quiet 확인
-  → A3 Leader 시작 및 joint feedback 확인
-  → START_INFERENCE_RECORD
+  → Mini standby 또는 A3 Leader joint feedback 확인
+  → 같은 recording을 Intervention 상태로 전환
   → 사람 교정 조작
   → 저장 또는 폐기
-  → Leader 종료 및 command quiet 확인
+  → Leader 격리 복귀/종료 및 command quiet 확인
   → RESUME_INFERENCE
 ```
 
 AI Worker가 intervention lease와 단계를 보관하므로 여러 브라우저에서 동일한 상태를 본다. Cyclo supervisor의 `/api/intervention/*`는 host-network의 AI Worker `:8780` API를 프록시하며, AI Worker token이 설정된 경우 브라우저에 노출하지 않고 서버 환경 변수로 전달한다.
 
-Cyclo Inference 설정에는 Intervention 전용 Task Num/Name을 추가했다. 선택값은 기존 `TaskInfo.tags`에 URL encoding하여 ROS 인터페이스 변경 없이 브라우저와 orchestrator 사이에 동기화한다. `START_INFERENCE_RECORD`에서만 이를 `task_num/task_name`으로 승격하며, cyclo_data는 명시적 identity가 있으면 timestamp 강제 치환을 하지 않는다. 같은 identity는 기존 DataManager를 재사용해 episode를 누적하고, 선택값이 모두 비어 있으면 기존 timestamp 기반 inference dataset 동작을 유지한다.
+Inference recording이 이미 진행 중이면 Intervention 시작 시 recorder를 stop/start하지 않는다. 정책 pause와 사람 교정은 같은 episode 및 같은 시간축에 남고, F2 양팔 action은 command arbiter의 `executed` 토픽을 기록해 POLICY와 TELEOP 소스를 하나의 연속 action 채널로 보존한다. `/leader/intervention_mode` Bool도 함께 기록해 사람 개입 구간을 식별한다. 녹화가 시작되지 않은 상태에서 Intervention을 시작한 경우에만 기존 호환 동작으로 새 inference recording을 연다.
 
 중간 오류, E-stop, DXL/feedback 단절 또는 PAUSED 상태 이탈이 발생하면 watchdog은 Leader를 종료하고 `PAUSED_SAFE`로 전환한다. 이 경로에서는 inference를 자동 재개하지 않는다.
 

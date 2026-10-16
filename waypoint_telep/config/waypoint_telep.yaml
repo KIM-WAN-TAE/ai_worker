@@ -1,0 +1,71 @@
+/**:
+  ros__parameters:
+    # Per-arm link and command topics are supplied by the dual-arm launch file.
+    base_link: arm_base_link
+    world_frame: world
+    tip_link: end_effector_l_link
+    gripper_joint: gripper_l_joint1
+    joint_states_topic: /joint_states
+    clicked_point_topic: /clicked_point
+    action_topic: /arm_l_controller/follow_joint_trajectory
+    external_command_topic: /leader/joint_trajectory_command_broadcaster_left/joint_trajectory
+    # Keyboard handoff keeps each gripper at the latest valid action target,
+    # never at the potentially lagging joint-state feedback value.
+    teleop_action_left_topic: /intervention/teleop/arm_left
+    teleop_action_right_topic: /intervention/teleop/arm_right
+    final_action_left_topic: /leader/joint_trajectory_command_broadcaster_left/joint_trajectory
+    final_action_right_topic: /leader/joint_trajectory_command_broadcaster_right/joint_trajectory
+
+    # The node stays non-actuating unless this is explicitly enabled at launch.
+    publish_enabled: false
+    # Keep direct FollowJointTrajectory disabled in normal use.  The web UI
+    # streams through command_source_arbiter so recorded action topics stay complete.
+    direct_action_enabled: false
+
+    # linear: Cartesian straight line, joint: smooth joint-space transition.
+    path_mode: linear
+    # Optional pass-through spline for an all-JOINT selected range. The UI can
+    # toggle this per arm; false preserves the original stop-at-each-point plan.
+    joint_smoothing_enabled: false
+    control_rate_hz: 100.0
+    # Display-only world poses are independent of 100 Hz command streaming.
+    display_rate_hz: 20.0
+    linear_speed_mps: 0.02
+    angular_speed_radps: 0.20
+    joint_speed_radps: 0.20
+    gripper_speed_radps: 0.20
+    # The optional UI slow-start action caps only the live pose -> first waypoint leg.
+    # Remaining waypoint segments keep their recorded speed scales.
+    slow_start_speed_scale: 1.0
+    minimum_segment_duration_s: 0.50
+    # Per-waypoint dwell is applied only when another waypoint follows.
+    max_waypoint_dwell_s: 30.0
+    # Dense 50 Hz replay waypoints need about 25.1x to overcome the configured
+    # 0.50 s minimum segment duration while preserving their recorded timing.
+    # The existing joint-step check still rejects unsafe 100 Hz discontinuities.
+    max_waypoint_speed_scale: 30.0
+    max_joint_step_rad: 0.05
+    # Keyboard Cartesian jog is limited to 2.5 mm per accepted request. The UI
+    # sends 0.25 mm steps at its default 5 mm/s setting.
+    max_cartesian_jog_step_m: 0.0025
+    # Relative-grasp generator accepts at most 50 mm of combined local XYZ
+    # correction and rejects the whole generated path if any IK target fails.
+    max_tool_path_correction_m: 0.05
+    max_start_velocity_radps: 0.02
+    command_quiet_s: 0.50
+    handoff_stop_timeout_s: 2.0
+    completion_timeout_s: 2.0
+    # Completion checks only the seven arm joints; gripper position is excluded.
+    completion_tolerance_rad: 0.05
+    max_schedule_lag_s: 0.05
+    keyboard_jog_period_s: 0.05
+    keyboard_jog_max_speed_mmps: 50.0
+    # Missing browser heartbeat relinquishes WAYPOINT ownership and selects NONE.
+    # Keep a margin over the 100 ms browser heartbeat for transient UI/network jitter.
+    keyboard_deadman_timeout_s: 1.00
+    # UI waits for fresh left/right Mini leader streams after starting the
+    # intervention service, then selects TELEOP. Relative anchoring still
+    # occurs only when the operator presses each arm's physical enable button.
+    teleop_ready_timeout_s: 10.0
+    ik_epsilon: 0.00001
+    ik_max_iterations: 200

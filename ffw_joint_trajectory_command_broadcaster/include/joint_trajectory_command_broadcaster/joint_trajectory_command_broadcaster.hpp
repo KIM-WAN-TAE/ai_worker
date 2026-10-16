@@ -15,6 +15,8 @@
 #ifndef JOINT_TRAJECTORY_COMMAND_BROADCASTER__JOINT_TRAJECTORY_COMMAND_BROADCASTER_HPP_
 #define JOINT_TRAJECTORY_COMMAND_BROADCASTER__JOINT_TRAJECTORY_COMMAND_BROADCASTER_HPP_
 
+#include <atomic>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -32,6 +34,10 @@
 #include "urdf/model.h"
 #include "trajectory_msgs/msg/joint_trajectory.hpp"
 #include "rclcpp/subscription.hpp"
+#include "realtime_tools/realtime_buffer.hpp"
+#include "joint_trajectory_command_broadcaster/relative_pose_mapper.hpp"
+#include "joint_trajectory_command_broadcaster/teleop_reference_mode.hpp"
+#include "joint_trajectory_command_broadcaster/toggle_command_gate.hpp"
 
 namespace joint_trajectory_command_broadcaster
 {
@@ -93,13 +99,27 @@ public:
 protected:
   bool init_joint_data();
   void handle_enable_msg(const std::string & group_name, uint8_t data);
-  void start_save_pose_interp(const std::string & group_name, const std::vector<double> & target);
+  void apply_enable_msg(const std::string & group_name, uint8_t data);
+  bool start_save_pose_interp(const std::string & group_name, const std::vector<double> & target);
   void start_teleop_blend(const std::string & group_name);
+  void prepare_teleop_entry(const std::string & group_name);
+  bool sync_follower_target(
+    const std::string & group_name, bool preserve_commanded_grippers = true);
+  bool configure_relative_pose_kinematics(
+    const urdf::Model & leader_model, const urdf::Model & follower_model);
+  bool update_relative_pose_target(
+    const std::string & group_name,
+    const std::vector<double> & leader_reference,
+    double period_sec,
+    std::vector<double> & candidate);
+  void reset_relative_pose_anchor(const std::string & group_name);
+  void reset_gripper_clutch(const std::string & group_name);
 
 protected:
   // Optional parameters
   std::shared_ptr<ParamListener> param_listener_;
   Params params_;
+  TeleopReferenceMode teleop_reference_mode_ = TeleopReferenceMode::ABSOLUTE;
   std::unordered_map<std::string, std::string> map_interface_to_joint_state_;
 
   std::vector<std::string> joint_names_;
@@ -142,33 +162,64 @@ protected:
   // Last published target per group (used as blend/interp start)
   std::unordered_map<std::string, std::vector<double>> group_last_target_;
 
-  // One-shot follower subscriptions to init last_target at startup
+  // Follower snapshots initialize last_target and keep it aligned with the
+  // physical follower while this broadcaster group is IDLE. This prevents a
+  // stale TELEOP command from being replayed after another source (for example
+  // WAYPOINT) has moved the follower.
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr left_follower_js_sub_;
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr right_follower_js_sub_;
+  rclcpp::Subscription<trajectory_msgs::msg::JointTrajectory>::SharedPtr
+  left_executed_action_sub_;
+  rclcpp::Subscription<trajectory_msgs::msg::JointTrajectory>::SharedPtr
+  right_executed_action_sub_;
   std::unordered_map<std::string, bool> group_last_target_initialized_;
+  std::unordered_map<std::string,
+    std::shared_ptr<realtime_tools::RealtimeBuffer<std::vector<double>>>>
+  group_follower_state_buffers_;
+  std::unordered_map<std::string,
+    std::shared_ptr<realtime_tools::RealtimeBuffer<std::vector<double>>>>
+  group_executed_action_buffers_;
+
+  struct EnableCommand
+  {
+    uint64_t sequence = 0;
+    uint8_t data = 0;
+  };
+  std::atomic<uint64_t> next_enable_command_sequence_{0};
+  std::unordered_map<std::string,
+    std::shared_ptr<realtime_tools::RealtimeBuffer<EnableCommand>>> group_enable_command_buffers_;
+  std::unordered_map<std::string, uint64_t> group_last_enable_command_sequence_;
 
   // Save poses per group: map<pose_id, positions>
   std::unordered_map<std::string, std::unordered_map<uint8_t, std::vector<double>>>
-    group_save_poses_;
+  group_save_poses_;
 
   // Follower joint limits per group (parallel to group_joint_names_)
   std::unordered_map<std::string, std::vector<double>> group_lower_limits_;
   std::unordered_map<std::string, std::vector<double>> group_upper_limits_;
+  std::unordered_map<std::string, std::vector<double>> group_velocity_limits_;
+
+  struct GroupPoseKinematics;
+  std::unordered_map<std::string, std::shared_ptr<GroupPoseKinematics>>
+  group_pose_kinematics_;
 
   // Operating mode per group
-  enum class Mode : uint8_t {
-    IDLE,       // no update to last_target (hold)
+  enum class Mode : uint8_t
+  {
+    IDLE,       // synchronize last_target with physical follower feedback
     TELEOP,     // teleoperation: track leader (with blend on entry)
     SAVE_POSE,  // cubic interpolate to save pose, then hold
   };
 
-  struct BlendState {
+  struct BlendState
+  {
     rclcpp::Time start_time;
     std::vector<double> start_pos;
     bool active = false;
   };
 
-  struct InterpState {
+  struct InterpState
+  {
     rclcpp::Time start_time;
     std::vector<double> start_pos;
     std::vector<double> target_pos;
@@ -176,10 +227,21 @@ protected:
     bool active = false;
   };
 
-  struct GroupRuntime {
+  struct GripperClutchState
+  {
+    std::vector<double> leader_anchor;
+    std::vector<double> command_anchor;
+    bool anchored = false;
+  };
+
+  struct GroupRuntime
+  {
     Mode mode = Mode::IDLE;
     BlendState blend;       // used when entering TELEOP
     InterpState interp;     // used for SAVE_POSE
+    GripperClutchState gripper_clutch;
+    uint8_t active_save_pose_id = 0;
+    ToggleCommandGate toggle_gate;
   };
   std::unordered_map<std::string, GroupRuntime> group_runtime_;
 

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import os
 import signal
@@ -21,7 +22,12 @@ from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
-from recovery_config import RECOVERY_PROFILES, RecoveryGroup, load_recovery_groups
+from recovery_config import (
+    RECOVERY_PROFILES,
+    RecoveryGroup,
+    load_custom_recovery_groups,
+    load_recovery_groups,
+)
 
 
 class RecoveryNode(Node):
@@ -147,11 +153,33 @@ class RecoveryNode(Node):
         label = f"복구 phase {phase_index + 1}/{phase_count} ({detail})"
         print(f"[PHASE] {label} 시작 — 모든 그룹을 동시에 전송합니다.", flush=True)
         send_futures = {}
+        phase_durations = {}
         for group in self.groups:
             start = tuple(self.positions[joint] for joint in group.joints)
             goal = FollowJointTrajectory.Goal()
             target = selected_steps[group.executor_name].positions
-            goal.trajectory = self.trajectory(group.joints, start, target, group.duration)
+            duration = group.duration
+            if selected_steps[group.executor_name].name == "custom":
+                # A quintic profile reaches 1.875 * delta / duration at its
+                # velocity peak. Keep manually entered targets deliberately
+                # slower than the hardware limit even if a short duration was
+                # requested.
+                speed_caps = []
+                for joint, current, requested in zip(group.joints, start, target):
+                    if joint == "lift_joint":
+                        cap = 0.05
+                    elif "gripper" in joint:
+                        cap = 0.25
+                    else:
+                        cap = 0.5
+                    speed_caps.append(1.875 * abs(requested - current) / cap)
+                duration = max(duration, *speed_caps)
+                print(
+                    f"[SAFETY] {group.label} 적용 이동 시간: {duration:.3f}s",
+                    flush=True,
+                )
+            phase_durations[group.executor_name] = duration
+            goal.trajectory = self.trajectory(group.joints, start, target, duration)
             send_futures[group.executor_name] = self.action_clients[group.executor_name].send_goal_async(goal)
 
         self.spin_until(
@@ -168,7 +196,7 @@ class RecoveryNode(Node):
         self.goal_handles = list(handles.values())
 
         result_futures = {name: handle.get_result_async() for name, handle in handles.items()}
-        max_duration = max(group.duration for group in self.groups)
+        max_duration = max(phase_durations.values())
         self.spin_until(
             lambda: all(future.done() for future in result_futures.values()),
             max_duration + 8.0,
@@ -204,6 +232,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", required=True, choices=sorted(RECOVERY_PROFILES))
     parser.add_argument("--config", type=Path, help="model initial-position YAML path")
     parser.add_argument(
+        "--targets-json",
+        help="operator-entered whole-body target lists as JSON",
+    )
+    parser.add_argument(
+        "--duration",
+        type=float,
+        default=8.0,
+        help="minimum custom-pose movement duration in seconds",
+    )
+    parser.add_argument(
         "--check-config",
         action="store_true",
         help="validate and print the YAML-derived plan without connecting to ROS or moving the robot",
@@ -214,8 +252,17 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     try:
-        groups = load_recovery_groups(args.model, args.config)
-    except ValueError as exc:
+        if args.targets_json:
+            targets = json.loads(args.targets_json)
+            groups = load_custom_recovery_groups(
+                args.model,
+                targets,
+                duration=args.duration,
+                config_path=args.config,
+            )
+        else:
+            groups = load_recovery_groups(args.model, args.config)
+    except (ValueError, json.JSONDecodeError) as exc:
         print(f"[FAILED] {exc}", file=sys.stderr, flush=True)
         return 2
 

@@ -1,17 +1,52 @@
 import unittest
 
 try:
-    from .logic import FOLLOWER_MODELS, LEADER_MODELS, SafetyState, diagnose_lines, gate_action, gate_intervention_reset, gate_intervention_start, operating_mode, parse_s6_status
-    from .recovery_config import default_config_path, load_recovery_groups
+    from .logic import FOLLOWER_MODELS, LEADER_MODELS, SafetyState, diagnose_lines, gate_action, gate_arbiter_fault_reset, gate_intervention_preflight, gate_intervention_reset, gate_intervention_start, gate_leader_standby_start, gate_paused_pose_move, intervention_resume_confirmed, operating_mode, parse_s6_status, sustained_failure_elapsed
+    from .recovery_config import default_config_path, load_custom_recovery_groups, load_recovery_groups
 except ImportError:
-    from logic import FOLLOWER_MODELS, LEADER_MODELS, SafetyState, diagnose_lines, gate_action, gate_intervention_reset, gate_intervention_start, operating_mode, parse_s6_status
-    from recovery_config import default_config_path, load_recovery_groups
+    from logic import FOLLOWER_MODELS, LEADER_MODELS, SafetyState, diagnose_lines, gate_action, gate_arbiter_fault_reset, gate_intervention_preflight, gate_intervention_reset, gate_intervention_start, gate_leader_standby_start, gate_paused_pose_move, intervention_resume_confirmed, operating_mode, parse_s6_status, sustained_failure_elapsed
+    from recovery_config import default_config_path, load_custom_recovery_groups, load_recovery_groups
 
 
 class SafetyGateTest(unittest.TestCase):
+    def test_standby_failure_must_outlive_its_grace(self):
+        self.assertFalse(sustained_failure_elapsed(None, 20.0, 3.0))
+        self.assertFalse(sustained_failure_elapsed(10.0, 12.999, 3.0))
+        self.assertTrue(sustained_failure_elapsed(10.0, 13.0, 3.0))
+        self.assertFalse(sustained_failure_elapsed(10.0, 9.0, 3.0))
+
+    def test_intervention_resume_accepts_slow_start_and_rejects_unsafe_routes(self):
+        base = {
+            "inference_phase": "SYNCING",
+            "arbiter_available": True,
+            "arbiter_mode": "POLICY",
+            "arbiter_fault": "",
+            "publisher_conflict": "",
+            "intervention_enabled": False,
+        }
+        self.assertTrue(intervention_resume_confirmed(**base))
+        self.assertTrue(intervention_resume_confirmed(
+            **{**base, "inference_phase": "INFERENCING"}
+        ))
+        for override in (
+            {"inference_phase": "PAUSED"},
+            {"arbiter_available": False},
+            {"arbiter_mode": "NONE"},
+            {"arbiter_fault": "policy lease lost"},
+            {"publisher_conflict": "left: duplicate"},
+            {"intervention_enabled": True},
+        ):
+            self.assertFalse(intervention_resume_confirmed(
+                **{**base, **override}
+            ))
+
     def test_supported_leader_launches_include_operational_a3(self):
         self.assertEqual(LEADER_MODELS["a3"]["launch"], "ffw_a3_ai.launch.py")
-        self.assertEqual(set(LEADER_MODELS), {"a3", "a2", "lg2"})
+        self.assertEqual(
+            LEADER_MODELS["mini"]["launch"],
+            "ffw_lg2_mini_leader_ai.launch.py",
+        )
+        self.assertEqual(set(LEADER_MODELS), {"a3", "mini", "a2", "lg2"})
 
     def test_only_f2_exposes_recovery_profile(self):
         self.assertTrue(FOLLOWER_MODELS["f2"]["recover_init"])
@@ -107,6 +142,77 @@ class SafetyGateTest(unittest.TestCase):
         )
         self.assertTrue(paused.ok)
 
+    def test_operator_pose_move_requires_quiet_paused_recording_ready_state(self):
+        base = dict(
+            inference_phase="PAUSED",
+            inference_status_ready=True,
+            recording_phase="READY",
+            recording_status_ready=True,
+            intervention_active=False,
+            arbiter_available=True,
+            arbiter_mode="NONE",
+            arbiter_fault="",
+            publisher_conflict="",
+            intervention_enabled=False,
+        )
+        allowed = gate_paused_pose_move(
+            self.healthy_f2(inference_present=True),
+            **base,
+        )
+        self.assertTrue(allowed.ok)
+
+        ready_allowed = gate_paused_pose_move(
+            self.healthy_f2(inference_present=True),
+            **{**base, "inference_phase": "READY"},
+        )
+        self.assertTrue(ready_allowed.ok)
+
+        saving_allowed = gate_paused_pose_move(
+            self.healthy_f2(inference_present=True),
+            **{**base, "recording_phase": "SAVING"},
+        )
+        self.assertTrue(saving_allowed.ok)
+
+        for override in (
+            {"inference_phase": "INFERENCING"},
+            {"recording_phase": "RECORDING"},
+            {"intervention_active": True},
+            {"arbiter_mode": "POLICY"},
+            {"intervention_enabled": True},
+        ):
+            blocked = gate_paused_pose_move(
+                self.healthy_f2(inference_present=True),
+                **{**base, **override},
+            )
+            self.assertFalse(blocked.ok)
+
+    def test_operator_pose_lists_are_checked_against_f2_joint_limits(self):
+        groups = load_recovery_groups("f2")
+        targets_by_executor = {
+            group.executor_name: list(group.steps[-1].positions)
+            for group in groups
+        }
+        targets = {
+            "left_arm": targets_by_executor["arm_l_joint_trajectory_executor"],
+            "right_arm": targets_by_executor["arm_r_joint_trajectory_executor"],
+            "head": targets_by_executor["head_joint_trajectory_executor"],
+            "lift": targets_by_executor["lift_joint_trajectory_executor"],
+        }
+        custom = load_custom_recovery_groups("f2", targets, duration=8)
+        self.assertTrue(all(group.steps[0].name == "custom" for group in custom))
+        self.assertTrue(all(group.duration == 8 for group in custom))
+
+        with self.assertRaisesRegex(ValueError, "8개"):
+            load_custom_recovery_groups(
+                "f2",
+                {**targets, "left_arm": [0.0]},
+                duration=8,
+            )
+        unsafe = {**targets, "left_arm": list(targets["left_arm"])}
+        unsafe["left_arm"][0] = 99.0
+        with self.assertRaisesRegex(ValueError, "허용 범위"):
+            load_custom_recovery_groups("f2", unsafe, duration=8)
+
     def test_intervention_rejects_recent_policy_command(self):
         result = gate_intervention_start(
             self.healthy_f2(
@@ -134,6 +240,22 @@ class SafetyGateTest(unittest.TestCase):
             recording_phase="READY",
         )
         self.assertTrue(allowed.ok)
+        warm_standby_allowed = gate_intervention_reset(
+            "READY_TO_RESUME",
+            leader_up=True,
+            command_recent=False,
+            recording_phase="READY",
+            leader_standby=True,
+        )
+        self.assertTrue(warm_standby_allowed.ok)
+        saving_allowed = gate_intervention_reset(
+            "READY_TO_RESUME",
+            leader_up=True,
+            command_recent=False,
+            recording_phase="SAVING",
+            leader_standby=True,
+        )
+        self.assertTrue(saving_allowed.ok)
 
         for overrides in (
             {"phase": "READY"},
@@ -149,6 +271,146 @@ class SafetyGateTest(unittest.TestCase):
             }
             values.update(overrides)
             self.assertFalse(gate_intervention_reset(**values).ok)
+
+    def test_intervention_preflight_requires_typed_status_and_clean_arbiter(self):
+        values = {
+            "state": self.healthy_f2(inference_present=True),
+            "inference_phase": "INFERENCING",
+            "inference_status_ready": True,
+            "recording_phase": "READY",
+            "recording_status_ready": True,
+            "arbiter_available": True,
+            "arbiter_mode": "POLICY",
+            "arbiter_fault": "",
+            "publisher_conflict": "",
+            "intervention_enabled": False,
+        }
+        self.assertTrue(gate_intervention_preflight(**values).ok)
+
+        for override in (
+            {"inference_status_ready": False},
+            {"recording_status_ready": False},
+            {"arbiter_available": False},
+            {"arbiter_fault": "policy lease lost"},
+            {"publisher_conflict": "left: duplicate"},
+            {"intervention_enabled": True},
+            {"recording_phase": "SAVING"},
+        ):
+            blocked = {**values, **override}
+            self.assertFalse(gate_intervention_preflight(**blocked).ok)
+
+    def test_paused_preflight_requires_arbiter_none(self):
+        values = {
+            "state": self.healthy_f2(inference_present=True),
+            "inference_phase": "PAUSED",
+            "inference_status_ready": True,
+            "recording_phase": "READY",
+            "recording_status_ready": True,
+            "arbiter_available": True,
+            "arbiter_mode": "POLICY",
+            "arbiter_fault": "",
+            "publisher_conflict": "",
+            "intervention_enabled": False,
+        }
+        self.assertFalse(gate_intervention_preflight(**values).ok)
+        self.assertTrue(gate_intervention_preflight(
+            **{**values, "arbiter_mode": "NONE"}
+        ).ok)
+
+    def test_warm_standby_is_allowed_without_treating_leader_as_conflict(self):
+        values = {
+            "state": self.healthy_f2(
+                inference_present=True,
+                leader_up=True,
+                leader_stream_active=True,
+                leader_standby=True,
+            ),
+            "inference_phase": "INFERENCING",
+            "inference_status_ready": True,
+            "recording_phase": "READY",
+            "recording_status_ready": True,
+            "arbiter_available": True,
+            "arbiter_mode": "POLICY",
+            "arbiter_fault": "",
+            "publisher_conflict": "",
+            "intervention_enabled": False,
+        }
+        self.assertTrue(gate_intervention_preflight(**values).ok)
+        self.assertTrue(gate_intervention_start(values["state"], "PAUSED").ok)
+
+        # An inference episode stays open across the policy-to-human handoff.
+        self.assertTrue(gate_intervention_preflight(
+            **{**values, "recording_phase": "RECORDING"}
+        ).ok)
+
+    def test_warm_standby_start_preserves_policy_ownership(self):
+        values = {
+            "state": self.healthy_f2(inference_present=True),
+            "inference_phase": "INFERENCING",
+            "inference_status_ready": True,
+            "recording_phase": "READY",
+            "recording_status_ready": True,
+            "arbiter_available": True,
+            "arbiter_mode": "POLICY",
+            "arbiter_fault": "",
+            "publisher_conflict": "",
+            "intervention_enabled": False,
+        }
+        allowed = gate_leader_standby_start(**values)
+        self.assertTrue(allowed.ok)
+        self.assertTrue(any("격리" in item for item in allowed.warnings))
+
+        self.assertTrue(gate_leader_standby_start(
+            **{**values, "recording_phase": "RECORDING"}
+        ).ok)
+
+        self.assertFalse(gate_leader_standby_start(
+            **{**values, "arbiter_mode": "TELEOP"}
+        ).ok)
+        self.assertFalse(gate_leader_standby_start(
+            **{**values, "intervention_enabled": True}
+        ).ok)
+
+    def test_fault_reset_requires_quiet_typed_none_without_conflict(self):
+        values = {
+            "inference_phase": "PAUSED",
+            "inference_status_ready": True,
+            "leader_up": False,
+            "command_recent": False,
+            "recording_phase": "READY",
+            "arbiter_available": True,
+            "arbiter_mode": "NONE",
+            "publisher_conflict": "",
+        }
+        self.assertTrue(gate_arbiter_fault_reset(**values).ok)
+        self.assertTrue(gate_arbiter_fault_reset(
+            **{
+                **values,
+                "leader_up": True,
+                "leader_standby": True,
+            }
+        ).ok)
+        self.assertTrue(gate_arbiter_fault_reset(
+            **{
+                **values,
+                "inference_phase": "CONNECTED",
+                "inference_status_ready": False,
+            }
+        ).ok)
+        for override in (
+            {"inference_phase": "INFERENCING"},
+            {"inference_phase": "LOADING"},
+            {"inference_phase": "SYNCING"},
+            {"leader_up": True},
+            {"command_recent": True},
+            {"recording_phase": "RECORDING"},
+            {"arbiter_available": False},
+            {"arbiter_mode": "TELEOP"},
+            {"publisher_conflict": "right: duplicate"},
+        ):
+            self.assertFalse(gate_arbiter_fault_reset(
+                **{**values, **override}
+            ).ok)
 
 
 class DiagnosticsTest(unittest.TestCase):

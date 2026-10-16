@@ -25,6 +25,7 @@
 
 #include "controller_interface/controller_interface.hpp"
 #include "hardware_interface/types/hardware_interface_type_values.hpp"
+#include "joystick_controller/tact_switch_gate.hpp"
 #include "joystick_controller/visibility_control.h"
 #include "ffw_joystick_controller/joystick_controller_parameters.hpp"
 #include "rclcpp/rclcpp.hpp"
@@ -47,6 +48,12 @@ struct JoystickValues
   double left_y = 0.0;
   double right_x = 0.0;
   double right_y = 0.0;
+};
+
+struct SensorReadResult
+{
+  std::vector<double> values;
+  std::vector<bool> valid;
 };
 
 class JoystickController : public controller_interface::ControllerInterface
@@ -97,13 +104,15 @@ protected:
 
   // Helper methods for better code organization
   double normalize_joystick_value(double raw_adc, bool is_tact_switch) const;
-  std::vector<double> read_and_normalize_sensor_values(size_t sensor_idx) const;
+  SensorReadResult read_and_normalize_sensor_values(size_t sensor_idx) const;
   void update_joystick_values(
     const std::string & sensor_name,
-    const std::vector<double> & normalized_values,
+    const SensorReadResult & sensor_read,
     JoystickValues & joystick_values,
     bool & left_tact_pressed,
-    bool & right_tact_pressed) const;
+    bool & right_tact_pressed,
+    bool & left_tact_valid,
+    bool & right_tact_valid) const;
   void update_last_active_positions(const std::vector<std::string> & controlled_joints);
   std::vector<double> calculate_joint_positions(
     const std::vector<std::string> & controlled_joints,
@@ -121,7 +130,9 @@ protected:
   void publish_cmd_vel(const JoystickValues & joystick_values);
   void publish_joystick_values();
   void handle_tact_switches(
-    bool left_tact_pressed, bool right_tact_pressed, const rclcpp::Time & current_time);
+    bool left_tact_pressed, bool right_tact_pressed,
+    bool left_tact_valid, bool right_tact_valid,
+    const rclcpp::Time & current_time);
   bool middle_pedal_signal_is_fresh(const rclcpp::Time & current_time) const;
   bool middle_pedal_is_active(const rclcpp::Time & current_time) const;
   void stop_mobile_base_commands();
@@ -158,14 +169,8 @@ protected:
   std::shared_ptr<ParamListener> param_listener_;
   Params params_;
 
-  bool prev_right_tact_switch_ = false;
-  bool prev_left_tact_switch_ = false;
-
-  // Long press functionality
-  rclcpp::Time left_tact_press_start_time_;
-  rclcpp::Time right_tact_press_start_time_;
-  bool left_tact_long_press_triggered_ = false;
-  bool right_tact_long_press_triggered_ = false;
+  TactSwitchGate left_tact_gate_;
+  TactSwitchGate right_tact_gate_;
 
   rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr tact_trigger_pub_;

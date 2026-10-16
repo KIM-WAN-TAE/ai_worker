@@ -16,7 +16,11 @@
   <depend>builtin_interfaces</depend>
   <depend>control_msgs</depend>
   <depend>controller_interface</depend>
+  <depend>eigen</depend>
+  <depend>eigen3_cmake_module</depend>
   <depend>generate_parameter_library</depend>
+  <depend>kdl_parser</depend>
+  <depend>orocos_kdl_vendor</depend>
   <depend>pluginlib</depend>
   <depend>rclcpp</depend>
   <depend>rclcpp_lifecycle</depend>

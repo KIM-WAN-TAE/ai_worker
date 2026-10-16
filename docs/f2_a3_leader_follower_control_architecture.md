@@ -46,8 +46,8 @@ F2 DynamixelHardware → 실제 F2 양팔
    실행해야 한다.
 2. A3 J5~J7의 `1.5`는 follower 쪽에서 다시 나누지 않는다. 즉 A3 관절 상태에
    이미 적용된 값을 broadcaster가 F2 목표 위치로 사용한다.
-3. A3 broadcaster의 `IDLE`은 명령 발행 중지가 아니라 **마지막 F2 목표를 계속
-   발행하여 유지**하는 상태다.
+3. A3 broadcaster의 `IDLE`은 명령 발행 중지가 아니라 **F2의 실제 관절 feedback으로
+   대기 목표를 갱신해 계속 발행**하는 상태다.
 4. `/leader/left_command`, `/leader/right_command`에는 각각 foot switch,
    joystick controller, gripper trigger라는 세 발행자가 있다. 메시지는 출처를
    표시하지 않으므로 여러 입력이 동시에 들어오지 않게 운영해야 한다.
@@ -67,7 +67,7 @@ F2 DynamixelHardware → 실제 F2 양팔
 | state | 측정값. 이 구성에서는 A3 측정 관절 상태와 F2 실제 feedback을 구분해야 한다. |
 | target/reference | follower controller가 따라가도록 요청받은 목표. 실제 F2가 도달한 값과 같다고 가정하면 안 된다. |
 | TELEOP | A3의 현재 관절 상태를 F2 목표로 계속 반영하는 모드. |
-| IDLE | leader 반영을 멈추고 broadcaster 내부의 `last_target`을 유지하는 모드. |
+| IDLE | leader 반영을 멈추고 follower feedback으로 broadcaster 내부의 `last_target`을 동기화하는 모드. |
 | SAVE_POSE | 설정 파일의 저장 자세까지 cubic interpolation한 뒤 그 목표를 유지하는 모드. |
 
 ## 3. 어떤 launch를 실행하는가
@@ -318,15 +318,15 @@ F2 target = clamp_F2_limit(
 
 | 모드 | `last_target` 처리 |
 |---|---|
-| `IDLE` | 갱신하지 않는다. 초기 F2 feedback 또는 마지막 목표를 유지한다. |
+| `IDLE` | F2의 실제 관절 feedback으로 갱신한다. 다른 source가 F2를 움직인 뒤에도 과거 목표가 남지 않는다. |
 | `TELEOP` | 현재 A3 변환 상태 + offset을 읽고 F2 limit로 clamp한다. 진입 시 2.5초 cubic smoothstep blend한다. |
 | `SAVE_POSE` | 현재 `last_target`에서 설정된 저장 자세까지 2.0초 cubic interpolation하고 완료 후 유지한다. |
 
 초기값 `left_enabled_init`와 `right_enabled_init`은 기본 false이므로 두 side 모두
-IDLE로 시작한다. broadcaster는 시작할 때 `/joint_states`에서 필요한 8개
-follower 관절을 이름으로 찾아 각 side의 `last_target`을 한 번 초기화한다.
-이후 그 follower subscription은 계속 존재하지만 초기화가 끝나면 새 feedback을
-`last_target`에 반영하지 않는다.
+IDLE로 시작한다. broadcaster는 `/joint_states`에서 필요한 8개 follower 관절을 이름으로
+찾아 각 side의 `last_target`을 초기화한다. 이후에도 IDLE인 동안에는 최신 follower
+feedback을 `last_target`에 반영한다. 따라서 waypoint나 policy가 F2를 움직인 뒤 teleop으로
+돌아와도 전환 전 자세에서 제어를 이어간다.
 
 ### 7.4 4단계: trajectory를 계속 발행한다
 
@@ -369,13 +369,14 @@ TELEOP에서는 F2 `/robot_description`을 transient-local/reliable QoS로 한 �
 | J1 | `[-3.14, 3.14]` | `[-3.14, 3.14]` |
 | J2 | `[0, 3.14]` | `[-3.14, 0]` |
 | J3 | `[-3.14, 3.14]` | `[-3.14, 3.14]` |
-| J4 | `[-2.9361, 1.0786]` | `[-2.9361, 1.0786]` |
+| J4 | `[-2.9361, 1.0785802415]` | `[-2.9361, 1.0785802415]` |
 | J5 | `[-3.14, 3.14]` | `[-3.14, 3.14]` |
 | J6 | `[-1.57, 1.57]` | `[-1.57, 1.57]` |
-| J7 | `[-1.8201, 1.5804]` | `[-1.5804, 1.8201]` |
+| J7 | `[-1.5707963268, 1.3639424895]` | `[-1.3639424895, 1.5707963268]` |
 | gripper | `[0, 1.1]` | `[0, 1.1]` |
 
-J5~J7에 1.5를 적용한 결과가 이 범위를 벗어나면 broadcaster가 target을 limit에
+이 값은 기존 URDF와 실제 장착 모터 설정 범위의 보수적 교집합이다. J5~J7에
+1.5를 적용한 결과가 이 범위를 벗어나면 broadcaster가 target을 limit에
 고정한다. 이 clamp는 안전에 도움이 되지만, raw leader 동작과 follower target의
 기울기가 범위 끝에서 더 이상 1.5가 아니게 된다는 뜻이기도 하다.
 
@@ -388,7 +389,7 @@ J5~J7에 1.5를 적용한 결과가 이 범위를 벗어나면 broadcaster가 ta
 
 | 값 | 의미 | 결과 |
 |---:|---|---|
-| 0 | disable/stop | `IDLE`; 마지막 target 유지 |
+| 0 | disable/stop | `IDLE`; follower feedback과 target 동기화 |
 | 1 | enable | `TELEOP`; 필요 시 2.5초 blend 후 leader 추종 |
 | 2 | toggle | `TELEOP ↔ IDLE` |
 | 3 이상 | save pose ID | 해당 side의 저장 자세 interpolation; 없는 ID는 경고 후 무시 |
@@ -517,7 +518,7 @@ middle_pedal_timeout_sec: 0.5
 | `/robot/arm_right_leader/joint_states` | `sensor_msgs/msg/JointState` | broadcaster가 내보내는 오른쪽 `last_target` 중심 state |
 | `/robot/head_leader/joint_states` | `sensor_msgs/msg/JointState` | joystick controller의 head 관련 state |
 | `/robot/lift_leader/joint_states` | `sensor_msgs/msg/JointState` | joystick controller의 lift 관련 state |
-| `/joint_states` | `sensor_msgs/msg/JointState` | F2 전체 실제 joint feedback 및 A3 broadcaster 초기 target source |
+| `/joint_states` | `sensor_msgs/msg/JointState` | F2 전체 실제 joint feedback 및 A3 broadcaster의 IDLE target source |
 | `/dynamic_joint_states` | `control_msgs/msg/DynamicJointState` | F2 interface별 상세 state |
 | `/arm_l_controller/controller_state` | `control_msgs/msg/JointTrajectoryControllerState` | left reference, feedback, error |
 | `/arm_r_controller/controller_state` | `control_msgs/msg/JointTrajectoryControllerState` | right reference, feedback, error |
@@ -709,7 +710,7 @@ parameter schema에는 아래 항목이 있지만 현재 broadcaster C++의 동�
   reject로 취급하지 않는다.
 - follower tracking error가 커도 A3 broadcaster 자체는 TELEOP를 자동
   중단하지 않는다.
-- IDLE은 command stream 정지가 아니라 target hold다.
+- IDLE은 command stream 정지가 아니라 follower feedback과 동기화된 target 발행이다.
 
 ### 15.4 안전/운영 관련
 

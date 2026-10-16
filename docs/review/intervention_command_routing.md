@@ -42,9 +42,13 @@ Policy와 A3는 최종 controller topic이 아니라 분리된 입력 topic으�
 ```text
 Policy ──> /intervention/policy/arm_left  ──┐
 Policy ──> /intervention/policy/arm_right ──┤
+Waypoint ─> /intervention/waypoint/arm_left ─┤
+Waypoint ─> /intervention/waypoint/arm_right ┤
+A3     ──> /intervention/teleop/arm_left  ──┤
+A3     ──> /intervention/teleop/arm_right ──┘
                                              ├─ command_source_arbiter
-A3     ──> /intervention/teleop/arm_left  ──┤        │
-A3     ──> /intervention/teleop/arm_right ──┘        ▼
+                                                     │
+                                                     ▼
                                       F2 최종 left/right arm controller topic
 ```
 
@@ -60,6 +64,7 @@ OMX 오른손목 observer는 검토 대상에서 제외했으므로 `OBSERVER` m
 | `NONE` | 없음 | 없음 | 시작, 전환, fault 상태에서 command 차단 |
 | `POLICY` | policy | policy | inference 명령 전달 |
 | `TELEOP` | A3 | A3 | Intervention 수동 교정 |
+| `WAYPOINT` | waypoint UI | waypoint UI | 녹화 가능한 계획 궤적 실행 |
 
 arbiter는 항상 `NONE`으로 시작한다. 준비되지 않은 source를 자동으로 선택하지 않으며,
 fault가 latch된 상태에서는 입력이 다시 정상으로 돌아와도 명시적으로 clear하기 전까지
@@ -92,9 +97,10 @@ publisher가 남아 있으면 source 선택을 거부하고 publisher 이름을 
 
 ## A3 연결
 
-표준 `ffw_a3_ai.launch.py`에 왼팔과 오른팔 trajectory 출력 topic argument를 추가한다.
-기본값은 기존 topic을 유지하므로 일반 A3 launch 동작은 바뀌지 않는다. Intervention에서만
-두 argument를 `/intervention/teleop/arm_left|right`로 지정한다.
+`ffw_a3_ai.launch.py`와 `ffw_lg2_mini_leader_ai.launch.py`에 왼팔과 오른팔 trajectory
+출력 topic argument를 둔다. 기본값은 기존 topic을 유지하므로 일반 launch 동작은 바뀌지
+않는다. Intervention 또는 waypoint-compatible teleop에서는 두 argument를
+`/intervention/teleop/arm_left|right`로 지정한다.
 
 F2 follower launch는 `command_source_arbiter`를 함께 시작한다. A3와 policy가 격리
 topic을 사용하기 전에는 `NONE`을 유지해야 하며, source readiness가 확인된 뒤에만
@@ -130,13 +136,31 @@ routing과 readiness 검증만 담당한다. `prepare_intervention`은 latched f
 
 - `select_none`: 양팔 command 전달 중지
 - `select_policy`: fresh policy pair 검증 후 policy 선택
-- `select_teleop`: fresh A3 pair 검증 후 teleop 선택
+- `select_teleop`: fresh A3 pair 검증 후 teleop 경로만 선택. 실제 양팔 출력은
+  mini-leader의 왼쪽·오른쪽 물리 버튼으로 각각 활성화한다.
+- `select_waypoint`: fresh waypoint pair 검증 후 계획 궤적 선택
 - `clear_fault`: fault 해제 후 `NONE` 유지
 - `get_status`: mode, fault, source readiness와 publisher 충돌 상태 조회
 - `prepare_intervention`, `disable_intervention`: 다음 handoff 계층에서 사용하는 A3 준비·종료
 
 상태는 `/command_source_arbiter/status`에 JSON으로 publish한다. A3 broadcaster에는
 `/leader/intervention_mode`를 전달해 Intervention 중 save-pose 입력을 차단한다.
+SensorXEL 버튼은 팔별 teleop 출력을 토글한다. 별도의 spring-gripper trigger는
+하강 임계값을 통과할 때 `enable=3`을 한 번 발행해 해당 팔을 저장된 초기자세 3으로
+복귀시킨다.
+mini-leader launch는 broadcaster 준비 1초 뒤 `TELEOP` 경로를 자동 선택한다. 이
+선택은 양팔을 켜지 않으며, 실제 팔별 활성화는 물리 버튼을 눌러야만 이뤄진다.
+
+Waypoint UI는 `POLICY`에서 제어권을 빼앗지 않는다. `TELEOP` 또는 `NONE`에서만
+`WAYPOINT`를 선택하며, 선택한 팔의 계획점과 반대쪽 팔의 hold 명령을 양팔 fresh pair로
+보낸다. 정상 완료 후에만 이전 mode가 `TELEOP`이면 텔레옵으로 돌아간다. 정지, source
+timeout, publish 지연, tracking 실패 때는 `NONE`을 유지한다. 실행 command가 기존 F2 최종
+action topic을 통과하므로 recorder를 중단하지 않고도 텔레옵과 waypoint 구간을 같은 action
+계약으로 저장할 수 있다.
+
+A3 broadcaster는 `IDLE` 동안 follower feedback으로 내부 `last_target`을 계속 갱신한다.
+따라서 waypoint 종료 자세에서 텔레옵을 다시 활성화할 때 과거 텔레옵 목표가 아니라 현재
+follower 자세부터 설정된 blend를 시작한다.
 
 ## 주요 변경 파일
 
@@ -144,6 +168,7 @@ routing과 readiness 검증만 담당한다. `prepare_intervention`은 latched f
 - `ffw_bringup/test/test_command_source_arbiter.py`
 - `ffw_bringup/launch/f2_follower_ai.launch.py`
 - `ffw_bringup/launch/ffw_a3_ai.launch.py`
+- `ffw_bringup/launch/ffw_lg2_mini_leader_ai.launch.py`
 - `ffw_bringup/setup.py`
 - `ffw_bringup/package.xml`
 

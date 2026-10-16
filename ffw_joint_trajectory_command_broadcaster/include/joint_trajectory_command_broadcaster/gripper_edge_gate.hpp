@@ -48,6 +48,81 @@ private:
   bool below_ = false;
 };
 
+enum class GripperGestureAction
+{
+  NONE,
+  SHORT_PRESS,
+  LONG_PRESS,
+};
+
+// Classify a gripper lever pull when there is no SensorXEL tact switch.
+// A short action is emitted on release. A long action is emitted once while
+// held, and suppresses the short action on the following release.
+class GripperPressGestureGate
+{
+public:
+  GripperGestureAction observe(
+    double position, double press_threshold, double release_threshold,
+    double now_sec, double long_press_duration)
+  {
+    if (!std::isfinite(position) || !std::isfinite(press_threshold) ||
+      !std::isfinite(release_threshold) || !std::isfinite(now_sec) ||
+      !std::isfinite(long_press_duration))
+    {
+      return GripperGestureAction::NONE;
+    }
+
+    if (!initialized_) {
+      initialized_ = true;
+      if (position < press_threshold) {
+        pressed_ = true;
+        suppress_until_release_ = true;
+      }
+      return GripperGestureAction::NONE;
+    }
+
+    if (!pressed_) {
+      if (position < press_threshold) {
+        pressed_ = true;
+        press_start_sec_ = now_sec;
+        long_press_triggered_ = false;
+        suppress_until_release_ = false;
+      }
+      return GripperGestureAction::NONE;
+    }
+
+    if (position > release_threshold) {
+      const bool emit_short = !suppress_until_release_ && !long_press_triggered_;
+      pressed_ = false;
+      long_press_triggered_ = false;
+      suppress_until_release_ = false;
+      return emit_short ? GripperGestureAction::SHORT_PRESS : GripperGestureAction::NONE;
+    }
+
+    if (!suppress_until_release_ && !long_press_triggered_ &&
+      now_sec >= press_start_sec_ &&
+      now_sec - press_start_sec_ >= long_press_duration)
+    {
+      long_press_triggered_ = true;
+      return GripperGestureAction::LONG_PRESS;
+    }
+
+    return GripperGestureAction::NONE;
+  }
+
+  bool initialized() const
+  {
+    return initialized_;
+  }
+
+private:
+  bool initialized_ = false;
+  bool pressed_ = false;
+  bool suppress_until_release_ = false;
+  bool long_press_triggered_ = false;
+  double press_start_sec_ = 0.0;
+};
+
 }  // namespace ffw_gripper_trigger
 
 #endif  // JOINT_TRAJECTORY_COMMAND_BROADCASTER__GRIPPER_EDGE_GATE_HPP_

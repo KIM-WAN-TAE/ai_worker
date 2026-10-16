@@ -340,7 +340,12 @@ def generate_launch_description():
         output='screen',
         # The Intervention controller owns the safety lease and s6 lifecycle.
         # The arbiter only owns command routing and readiness validation.
-        parameters=[{'manage_leader_service': False}],
+        parameters=[{
+            'manage_leader_service': False,
+            # Allow the standard GR00T sync path to bridge one TensorRT
+            # inference interval while retaining fail-closed source expiry.
+            'max_source_age_s': 0.60,
+        }],
     )
 
     dual_laser_merger_node = Node(

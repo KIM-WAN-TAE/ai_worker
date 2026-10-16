@@ -85,9 +85,11 @@ double JoystickController::normalize_joystick_value(double raw_adc, bool is_tact
   return normalized_value;
 }
 
-std::vector<double> JoystickController::read_and_normalize_sensor_values(size_t sensor_idx) const
+SensorReadResult JoystickController::read_and_normalize_sensor_values(size_t sensor_idx) const
 {
-  std::vector<double> normalized_values(state_interface_types_.size(), 0.0);
+  SensorReadResult result;
+  result.values.resize(state_interface_types_.size(), 0.0);
+  result.valid.resize(state_interface_types_.size(), false);
 
   for (size_t j = 0; j < state_interface_types_.size(); ++j) {
     if (j >= joint_state_interface_.size() || sensor_idx >= joint_state_interface_[j].size()) {
@@ -104,6 +106,12 @@ std::vector<double> JoystickController::read_and_normalize_sensor_values(size_t 
     }
 
     double raw_adc = opt_value.value();
+    if (!std::isfinite(raw_adc)) {
+      RCLCPP_ERROR(
+        get_node()->get_logger(), "Non-finite value for state interface [%zu][%zu]", j,
+        sensor_idx);
+      continue;
+    }
     bool is_tact_switch = (j == constants::TACT_SWITCH_INTERFACE_INDEX);
     double normalized_value = normalize_joystick_value(raw_adc, is_tact_switch);
 
@@ -117,32 +125,49 @@ std::vector<double> JoystickController::read_and_normalize_sensor_values(size_t 
       normalized_value = -normalized_value;
     }
 
-    normalized_values[j] = normalized_value;
+    result.values[j] = normalized_value;
+    result.valid[j] = true;
   }
 
-  return normalized_values;
+  return result;
 }
 
 void JoystickController::update_joystick_values(
   const std::string & sensor_name,
-  const std::vector<double> & normalized_values,
+  const SensorReadResult & sensor_read,
   JoystickValues & joystick_values,
   bool & left_tact_pressed,
-  bool & right_tact_pressed) const
+  bool & right_tact_pressed,
+  bool & left_tact_valid,
+  bool & right_tact_valid) const
 {
+  const auto & normalized_values = sensor_read.values;
+  const auto & valid = sensor_read.valid;
   if (sensor_name == constants::LEFT_JOYSTICK_NAME) {
-    joystick_values.left_x = normalized_values[0];
-    joystick_values.left_y = normalized_values[1];
-    if (normalized_values.size() > constants::TACT_SWITCH_INTERFACE_INDEX) {
+    if (valid.size() > 1 && valid[0] && valid[1]) {
+      joystick_values.left_x = normalized_values[0];
+      joystick_values.left_y = normalized_values[1];
+    }
+    if (normalized_values.size() > constants::TACT_SWITCH_INTERFACE_INDEX &&
+      valid.size() > constants::TACT_SWITCH_INTERFACE_INDEX &&
+      valid[constants::TACT_SWITCH_INTERFACE_INDEX])
+    {
       left_tact_pressed = (normalized_values[constants::TACT_SWITCH_INTERFACE_INDEX] >
         constants::TACT_SWITCH_THRESHOLD);
+      left_tact_valid = true;
     }
   } else if (sensor_name == constants::RIGHT_JOYSTICK_NAME) {
-    joystick_values.right_x = normalized_values[0];
-    joystick_values.right_y = normalized_values[1];
-    if (normalized_values.size() > constants::TACT_SWITCH_INTERFACE_INDEX) {
+    if (valid.size() > 1 && valid[0] && valid[1]) {
+      joystick_values.right_x = normalized_values[0];
+      joystick_values.right_y = normalized_values[1];
+    }
+    if (normalized_values.size() > constants::TACT_SWITCH_INTERFACE_INDEX &&
+      valid.size() > constants::TACT_SWITCH_INTERFACE_INDEX &&
+      valid[constants::TACT_SWITCH_INTERFACE_INDEX])
+    {
       right_tact_pressed = (normalized_values[constants::TACT_SWITCH_INTERFACE_INDEX] >
         constants::TACT_SWITCH_THRESHOLD);
+      right_tact_valid = true;
     }
   }
 }
@@ -276,7 +301,9 @@ void JoystickController::publish_joystick_values()
 }
 
 void JoystickController::handle_tact_switches(
-  bool left_tact_pressed, bool right_tact_pressed, const rclcpp::Time & current_time)
+  bool left_tact_pressed, bool right_tact_pressed,
+  bool left_tact_valid, bool right_tact_valid,
+  const rclcpp::Time & current_time)
 {
   const bool middle_pedal_signal_fresh = middle_pedal_signal_is_fresh(current_time);
   const bool middle_pedal_reported_pressed =
@@ -285,114 +312,58 @@ void JoystickController::handle_tact_switches(
     middle_pedal_reported_pressed && middle_pedal_signal_fresh;
   const bool stale_pressed_pedal =
     middle_pedal_reported_pressed && !middle_pedal_signal_fresh;
+  const double now_sec = current_time.seconds();
+  const auto left_action = left_tact_gate_.observe(
+    left_tact_valid, left_tact_pressed, now_sec, params_.long_press_duration);
+  const auto right_action = right_tact_gate_.observe(
+    right_tact_valid, right_tact_pressed, now_sec, params_.long_press_duration);
 
-  // Create current state as bit pattern: left=bit1, right=bit0
-  // 00 = neither pressed, 01 = right only, 10 = left only, 11 = both pressed
-  uint8_t current_state = (left_tact_pressed ? 2 : 0) | (right_tact_pressed ? 1 : 0);
-  uint8_t prev_state = (prev_left_tact_switch_ ? 2 : 0) | (prev_right_tact_switch_ ? 1 : 0);
-
-  // Handle left tact switch press start
-  if (left_tact_pressed && !prev_left_tact_switch_) {
-    left_tact_press_start_time_ = current_time;
-    left_tact_long_press_triggered_ = false;
-  }
-
-  // Handle right tact switch press start
-  if (right_tact_pressed && !prev_right_tact_switch_) {
-    right_tact_press_start_time_ = current_time;
-    right_tact_long_press_triggered_ = false;
-  }
-
-  // Check for long press on left tact switch
-  if (left_tact_pressed && !left_tact_long_press_triggered_ && !stale_pressed_pedal) {
-    auto press_duration = current_time - left_tact_press_start_time_;
-    if (press_duration.seconds() >= params_.long_press_duration) {
-      std_msgs::msg::String trigger_msg;
-      trigger_msg.data = "left_long_time";
-      tact_trigger_pub_->publish(trigger_msg);
-      RCLCPP_INFO(get_node()->get_logger(), "Left tact switch long press triggered!");
-      left_tact_long_press_triggered_ = true;
-    }
-  }
-
-  // Check for long press on right tact switch
-  if (right_tact_pressed && !right_tact_long_press_triggered_ && !stale_pressed_pedal) {
-    auto press_duration = current_time - right_tact_press_start_time_;
-    if (press_duration.seconds() >= params_.long_press_duration) {
-      std_msgs::msg::String trigger_msg;
-      trigger_msg.data = middle_pedal_held ? "right_long_time_middle" : "right_long_time";
-      tact_trigger_pub_->publish(trigger_msg);
-      RCLCPP_INFO(
-        get_node()->get_logger(), "Right tact switch long press triggered! (middle: %s)",
-        middle_pedal_held ? "held" : "not held");
-      right_tact_long_press_triggered_ = true;
-    }
-  }
-
-  // Only trigger actions when reaching 00 state (no buttons pressed)
-  if (current_state == 0 && prev_state != 0) {
-    if (stale_pressed_pedal) {
-      RCLCPP_WARN(
-        get_node()->get_logger(),
-        "Ignoring tact release because the pressed middle-pedal heartbeat is stale");
-    } else {
-      switch (prev_state) {
-        case 1:  // 01 -> 00 (right button only was pressed)
-          if (!right_tact_long_press_triggered_) {
-            if (middle_pedal_held) {
-              std_msgs::msg::String trigger_msg;
-              trigger_msg.data = "right";
-              tact_trigger_pub_->publish(trigger_msg);
-              RCLCPP_INFO(get_node()->get_logger(), "Right tact trigger (middle pedal held)");
-            } else {
-              std_msgs::msg::UInt8 enable_msg;
-              enable_msg.data = 2;
-              right_enable_pub_->publish(enable_msg);
-              RCLCPP_INFO(get_node()->get_logger(), "Right toggle pub");
-            }
-          }
-          break;
-
-        case 2:  // 10 -> 00 (left button only was pressed)
-          if (!left_tact_long_press_triggered_) {
-            if (middle_pedal_held) {
-              std_msgs::msg::String trigger_msg;
-              trigger_msg.data = "left";
-              tact_trigger_pub_->publish(trigger_msg);
-              RCLCPP_INFO(get_node()->get_logger(), "Left tact trigger (middle pedal held)");
-            } else {
-              std_msgs::msg::UInt8 enable_msg;
-              enable_msg.data = 2;
-              left_enable_pub_->publish(enable_msg);
-              RCLCPP_INFO(get_node()->get_logger(), "Left toggle pub");
-            }
-          }
-          break;
-
-        case 3:  // 11 -> 00 (both buttons were pressed)
-          if ((!left_tact_long_press_triggered_) && (!right_tact_long_press_triggered_)) {
-            std_msgs::msg::UInt8 enable_msg;
-            enable_msg.data = 2;
-            left_enable_pub_->publish(enable_msg);
-            right_enable_pub_->publish(enable_msg);
-            RCLCPP_INFO(get_node()->get_logger(), "both toggle pub");
-          }
-          break;
+  auto publish_short_action =
+    [this, middle_pedal_held, stale_pressed_pedal](
+    const char * side,
+    const rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr & enable_pub)
+    {
+      if (stale_pressed_pedal) {
+        RCLCPP_WARN(
+          get_node()->get_logger(),
+          "Ignoring %s tact release because the pressed middle-pedal heartbeat is stale",
+          side);
+        return;
       }
-    }
 
-    // Reset long press flags when buttons are released
-    if (prev_state == 1 || prev_state == 3) {  // Right button was pressed
-      right_tact_long_press_triggered_ = false;
-    }
-    if (prev_state == 2 || prev_state == 3) {  // Left button was pressed
-      left_tact_long_press_triggered_ = false;
-    }
+      if (middle_pedal_held) {
+        std_msgs::msg::String trigger_msg;
+        trigger_msg.data = side;
+        tact_trigger_pub_->publish(trigger_msg);
+        RCLCPP_INFO(
+          get_node()->get_logger(), "%s tact trigger (middle pedal held)", side);
+      } else {
+        std_msgs::msg::UInt8 enable_msg;
+        enable_msg.data = 2;
+        enable_pub->publish(enable_msg);
+        RCLCPP_INFO(get_node()->get_logger(), "%s toggle pub", side);
+      }
+    };
+
+  if (left_action == TactSwitchAction::SHORT_PRESS) {
+    publish_short_action("left", left_enable_pub_);
+  } else if (left_action == TactSwitchAction::LONG_PRESS && !stale_pressed_pedal) {
+    std_msgs::msg::String trigger_msg;
+    trigger_msg.data = "left_long_time";
+    tact_trigger_pub_->publish(trigger_msg);
+    RCLCPP_INFO(get_node()->get_logger(), "Left tact switch long press triggered!");
   }
 
-  // Update previous state
-  prev_left_tact_switch_ = left_tact_pressed;
-  prev_right_tact_switch_ = right_tact_pressed;
+  if (right_action == TactSwitchAction::SHORT_PRESS) {
+    publish_short_action("right", right_enable_pub_);
+  } else if (right_action == TactSwitchAction::LONG_PRESS && !stale_pressed_pedal) {
+    std_msgs::msg::String trigger_msg;
+    trigger_msg.data = middle_pedal_held ? "right_long_time_middle" : "right_long_time";
+    tact_trigger_pub_->publish(trigger_msg);
+    RCLCPP_INFO(
+      get_node()->get_logger(), "Right tact switch long press triggered! (middle: %s)",
+      middle_pedal_held ? "held" : "not held");
+  }
 }
 
 bool JoystickController::middle_pedal_signal_is_fresh(const rclcpp::Time & current_time) const
@@ -492,6 +463,8 @@ controller_interface::return_type JoystickController::update(
   JoystickValues joystick_values;
   bool left_tact_switch_pressed = false;
   bool right_tact_switch_pressed = false;
+  bool left_tact_sample_valid = false;
+  bool right_tact_sample_valid = false;
 
   // Process each sensor
   for (size_t sensor_idx = 0; sensor_idx < sensorxel_joy_names_.size(); ++sensor_idx) {
@@ -503,13 +476,16 @@ controller_interface::return_type JoystickController::update(
 
     // Always read all interfaces. Command outputs are gated independently below,
     // while tact-switch and diagnostic state remain available.
-    std::vector<double> normalized_values = read_and_normalize_sensor_values(sensor_idx);
+    const SensorReadResult sensor_read = read_and_normalize_sensor_values(sensor_idx);
+    const auto & normalized_values = sensor_read.values;
 
     // Auxiliary-joint activity only depends on joystick axes, not the tact switch state.
     bool any_sensorxel_joy_active = false;
     if (joint_jog_enabled) {
       for (size_t j = 0; j < normalized_values.size(); ++j) {
-        if (j == constants::TACT_SWITCH_INTERFACE_INDEX) {
+        if (j == constants::TACT_SWITCH_INTERFACE_INDEX ||
+          j >= sensor_read.valid.size() || !sensor_read.valid[j])
+        {
           continue;
         }
         if (std::abs(normalized_values[j]) > 0.0) {
@@ -520,8 +496,10 @@ controller_interface::return_type JoystickController::update(
     }
 
     // Update joystick values
-    update_joystick_values(sensor_name, normalized_values, joystick_values,
-                          left_tact_switch_pressed, right_tact_switch_pressed);
+    update_joystick_values(
+      sensor_name, sensor_read, joystick_values,
+      left_tact_switch_pressed, right_tact_switch_pressed,
+      left_tact_sample_valid, right_tact_sample_valid);
 
     // Update last active positions when joystick becomes inactive
     if (was_active_ && !any_sensorxel_joy_active && !current_joint_states_.name.empty() &&
@@ -565,7 +543,13 @@ controller_interface::return_type JoystickController::update(
     }
 
     was_active_ = any_sensorxel_joy_active;
-    sensorxel_joy_values_[sensor_idx] = normalized_values;
+    for (size_t j = 0; j < normalized_values.size() &&
+      j < sensorxel_joy_values_[sensor_idx].size(); ++j)
+    {
+      if (j < sensor_read.valid.size() && sensor_read.valid[j]) {
+        sensorxel_joy_values_[sensor_idx][j] = normalized_values[j];
+      }
+    }
   }
 
   // Gate mobile-base commands separately from auxiliary-joint jog. Publishing
@@ -582,7 +566,9 @@ controller_interface::return_type JoystickController::update(
   // Publish joystick values
   publish_joystick_values();
 
-  handle_tact_switches(left_tact_switch_pressed, right_tact_switch_pressed, time);
+  handle_tact_switches(
+    left_tact_switch_pressed, right_tact_switch_pressed,
+    left_tact_sample_valid, right_tact_sample_valid, time);
 
   RCLCPP_DEBUG(get_node()->get_logger(), "Joystick controller update completed");
 
@@ -750,15 +736,6 @@ controller_interface::CallbackReturn JoystickController::on_configure(
     "/leader/left_command", 1);
   right_enable_pub_ = get_node()->create_publisher<std_msgs::msg::UInt8>(
     "/leader/right_command", 1);
-
-  prev_right_tact_switch_ = false;
-  prev_left_tact_switch_ = false;
-
-  // Initialize long press variables
-  left_tact_long_press_triggered_ = false;
-  right_tact_long_press_triggered_ = false;
-  left_tact_press_start_time_ = rclcpp::Time(0);
-  right_tact_press_start_time_ = rclcpp::Time(0);
 
   // Create publisher for cmd_vel
   cmd_vel_pub_ = get_node()->create_publisher<geometry_msgs::msg::Twist>("/cmd_vel", 10);

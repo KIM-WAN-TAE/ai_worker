@@ -92,20 +92,106 @@ joint_trajectory_command_broadcaster:
     default_value: false,
     description: "Initial enable state for right arm group."
   }
+  teleop_reference_mode: {
+    type: string,
+    default_value: "absolute",
+    description: "Leader reference mapping: 'absolute' forwards transformed leader joints; 'relative' applies Cyclo-style end-effector pose displacement from enable-time anchors.",
+    read_only: true
+  }
+  relative_base_link: {
+    type: string,
+    default_value: "arm_base_link",
+    description: "Base frame present in both leader and follower URDFs for relative-pose FK.",
+    read_only: true
+  }
+  left_end_effector_link: {
+    type: string,
+    default_value: "arm_l_link7",
+    description: "Left end-effector link used by leader/follower FK and follower velocity IK.",
+    read_only: true
+  }
+  right_end_effector_link: {
+    type: string,
+    default_value: "arm_r_link7",
+    description: "Right end-effector link used by leader/follower FK and follower velocity IK.",
+    read_only: true
+  }
+  relative_kp_position: {
+    type: double,
+    default_value: 50.0,
+    description: "Cyclo RelativePoseMode position-error gain.",
+    read_only: true
+  }
+  relative_kp_orientation: {
+    type: double,
+    default_value: 50.0,
+    description: "Cyclo RelativePoseMode orientation-error gain.",
+    read_only: true
+  }
+  relative_weight_position: {
+    type: double,
+    default_value: 10.0,
+    description: "Cartesian position weight in relative velocity IK.",
+    read_only: true
+  }
+  relative_weight_orientation: {
+    type: double,
+    default_value: 1.0,
+    description: "Cartesian orientation weight in relative velocity IK.",
+    read_only: true
+  }
+  relative_damping_weight: {
+    type: double,
+    default_value: 0.1,
+    description: "Joint-velocity damping weight, matching Cyclo's default ModeOutput damping.",
+    read_only: true
+  }
+  toggle_debounce_duration_sec: {
+    type: double,
+    default_value: 0.75,
+    description: "Suppress duplicate toggle commands received within this interval. Set to 0 to disable deduplication.",
+    read_only: true
+  }
   left_follower_joint_states_topic: {
     type: string,
     default_value: "/robot/arm_left_follower/joint_states",
-    description: "Follower joint states topic for left arm (used to init last_target once at startup)."
+    description: "Follower joint states topic for left arm (initializes last_target and refreshes it while the group is IDLE)."
   }
   right_follower_joint_states_topic: {
     type: string,
     default_value: "/robot/arm_right_follower/joint_states",
-    description: "Follower joint states topic for right arm (used to init last_target once at startup)."
+    description: "Follower joint states topic for right arm (initializes last_target and refreshes it while the group is IDLE)."
+  }
+  left_executed_action_topic: {
+    type: string,
+    default_value: "/command_source_arbiter/executed/arm_left",
+    description: "Latched command actually forwarded to the left arm. Its gripper target is retained while arm joints are rebased from follower state."
+  }
+  right_executed_action_topic: {
+    type: string,
+    default_value: "/command_source_arbiter/executed/arm_right",
+    description: "Latched command actually forwarded to the right arm. Its gripper target is retained while arm joints are rebased from follower state."
+  }
+  gripper_clutch_deadband: {
+    type: double,
+    default_value: 0.02,
+    description: "Leader gripper movement in radians ignored after entering TELEOP so the last executed gripper action remains latched.",
+    validation: {
+      gt_eq<>: [0.0]
+    }
+  }
+  gripper_clutch_scale: {
+    type: double,
+    default_value: 1.0,
+    description: "Scale applied to leader gripper displacement after the TELEOP clutch deadband.",
+    validation: {
+      gt<>: [0.0]
+    }
   }
   follower_robot_description_topic: {
     type: string,
     default_value: "/robot_description",
-    description: "Topic name providing follower's robot_description. Used to fetch joint limits once at startup for TELEOP clamping."
+    description: "Topic name providing follower's robot_description. Used to build relative-pose kinematics and load joint limits at startup."
   }
   save_pose_duration: {
     type: double,

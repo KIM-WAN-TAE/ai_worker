@@ -501,14 +501,15 @@ E-stop 유지
 
 ## 15. Intervention 사용법
 
-Intervention은 현재 F2 Follower와 A3 Leader 조합에서 Cyclo Intelligence의 Inference 화면으로 사용한다. 별도로 policy Docker를 종료하거나 다시 켜지 않는다.
+Intervention은 현재 F2 Follower와 Mini/A3 Leader 조합에서 Cyclo Intelligence의 Inference 화면으로 사용한다. 별도로 policy Docker를 종료하거나 다시 켜지 않는다.
 
 Inference 설정의 `Intervention Dataset`에서 Task Num과 Task Name을 함께 입력할 수 있다. 예를 들어 `000389`와 `OMX_Insert_F2_Intervention`을 입력하면 저장 위치는 `Task_000389_OMX_Insert_F2_Intervention_MCAP`이며, 이후 같은 선택으로 `Save`할 때 episode 0, 1, 2 순서로 누적된다. 두 항목은 모든 Cyclo 브라우저에 동기화된다. 한 항목만 입력했거나 경로 구분자가 포함되면 Intervention 시작이 차단된다. 둘 다 비워두면 기존 호환 방식대로 Save마다 `Task_<UTC시각>_inference_MCAP`을 만든다.
 
-1. Real Robot inference 중 실패 시점에 `Intervene`를 누른다.
-2. 화면이 `RECORDING`이 된 것을 확인하고 A3 Leader로 실패 구간을 교정한다.
-3. 데이터를 쓸 경우 `Save`, 버릴 경우 `Discard`를 누른다.
-4. UI가 Leader를 종료하고 command quiet를 확인한 뒤 inference를 자동 재개한다.
+1. Real Robot inference에서 `Inference Record`를 먼저 시작한다.
+2. 실패 시점에 `Intervention Record`를 누른다. 기존 recording은 멈추거나 새 episode로 바뀌지 않는다.
+3. 화면이 `RECORDING`인 것을 확인하고 Mini 또는 A3 Leader로 이어서 교정한다.
+4. `Save`는 inference 시작부터 사람 교정까지의 연속 episode 전체를 한 번 저장하며, `Discard`는 그 episode 전체를 폐기한다.
+5. UI가 Leader를 standby로 되돌리거나 종료하고 command quiet를 확인한 뒤 inference를 자동 재개한다.
 
 `Abort`는 녹화를 폐기하고 Leader를 종료하지만 inference는 `PAUSED`로 유지한다. `PAUSED_SAFE`가 표시되면 현장과 로봇 상태를 확인한 후 `Resume`을 명시적으로 눌러야 한다.
 
@@ -519,3 +520,5 @@ Intervention 도중 다른 노트북에서도 같은 단계와 버튼이 보이�
 AI Worker 상태의 Inference와 Recording 항목에서 `typed_status_available=true`여야 물리 Intervention을 시험할 수 있다. 최초 AI Worker Control 시작에서는 Cyclo interface overlay 빌드 때문에 웹 접속까지 수 분이 걸릴 수 있고, 이후에는 IDL이 바뀌지 않는 한 바로 시작한다.
 
 현재 ROS E-stop 토픽이 설정되지 않았다면 UI의 적색 감시는 실제 E-stop 상태를 알 수 없다. 첫 물리 시험은 반드시 주변을 비우고 물리 E-stop을 손에 둔 상태에서 짧고 낮은 위험의 교정 동작으로 진행한다.
+
+Mini는 선택 시 미리 warm-standby로 연결된다. standby 중 양팔은 Arbiter 뒤의 격리 토픽으로만 발행되고, head/lift, `/cmd_vel`, recording trigger도 운영 토픽에서 분리된다. `Mini · Standby`가 표시된 뒤에만 Intervention을 시작한다.

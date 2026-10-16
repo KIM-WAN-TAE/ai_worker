@@ -15,12 +15,14 @@ if [ "${LEADER_TYPE}" = "a3" ]; then
     # gripper sample, then requires a fresh above-to-below threshold crossing.
     # This keeps the save-pose shortcut without the former startup edge.
     ROS2_COMMAND="ros2 launch ffw_bringup ffw_a3_ai.launch.py launch_gripper_trigger:=true"
+elif [ "${LEADER_TYPE}" = "mini" ]; then
+    ROS2_COMMAND="ros2 launch ffw_bringup ffw_lg2_mini_leader_ai.launch.py"
 elif [ "${LEADER_TYPE}" = "a2" ]; then
     ROS2_COMMAND="ros2 launch ffw_bringup ffw_a2_ai.launch.py"
 elif [ "${LEADER_TYPE}" = "lg2" ]; then
     ROS2_COMMAND="ros2 launch ffw_bringup ffw_lg2_leader_ai.launch.py"
 else
-    echo "[${SERVICE_NAME}] Error: unsupported leader type '${LEADER_TYPE}' (supported: a3, a2, lg2)" >&2
+    echo "[${SERVICE_NAME}] Error: unsupported leader type '${LEADER_TYPE}' (supported: a3, mini, a2, lg2)" >&2
     exit 1
 fi
 COMMON_SCRIPT="/usr/local/lib/s6-services/ros2_service_run.sh"

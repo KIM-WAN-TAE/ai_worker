@@ -54,14 +54,30 @@ FOLLOWER_MODELS = {
 
 LEADER_MODELS = {
     "a3": {"label": "A3", "launch": "ffw_a3_ai.launch.py"},
+    "mini": {
+        "label": "Mini",
+        "launch": "ffw_lg2_mini_leader_ai.launch.py",
+    },
     "a2": {"label": "A2", "launch": "ffw_a2_ai.launch.py"},
     "lg2": {"label": "LG2", "launch": "ffw_lg2_leader_ai.launch.py"},
 }
 
 
+def sustained_failure_elapsed(
+    failure_started_s: float | None,
+    now_s: float,
+    grace_s: float,
+) -> bool:
+    """Return true only after one continuously observed failure outlives its grace."""
+    if failure_started_s is None:
+        return False
+    return max(0.0, now_s - failure_started_s) >= max(0.0, grace_s)
+
+
 def operating_mode(
     *,
     leader_up: bool,
+    leader_standby: bool = False,
     inference_present: bool,
     inference_active: bool,
     inference_phase: str = "UNAVAILABLE",
@@ -76,7 +92,7 @@ def operating_mode(
             "conflict": False,
         }
     inference_session = inference_present or inference_active
-    if leader_up and inference_session:
+    if leader_up and inference_session and not leader_standby:
         return {
             "name": "conflict",
             "label": "MODE CONFLICT",
@@ -88,7 +104,11 @@ def operating_mode(
         return {
             "name": "inference",
             "label": "INFERENCE MODE",
-            "detail": f"Inference session · {phase}",
+            "detail": (
+                f"Inference session · {phase} · Leader standby"
+                if leader_standby
+                else f"Inference session · {phase}"
+            ),
             "conflict": False,
         }
     if leader_up:
@@ -114,6 +134,7 @@ class SafetyState:
     inference_present: bool = False
     inference_active: bool = False
     leader_up: bool = False
+    leader_standby: bool = False
     leader_stream_active: bool = False
     command_stream_active: bool = False
     follower_up: bool = False
@@ -135,6 +156,93 @@ class GateResult:
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+def intervention_resume_confirmed(
+    *,
+    inference_phase: str,
+    arbiter_available: bool,
+    arbiter_mode: str,
+    arbiter_fault: str,
+    publisher_conflict: str,
+    intervention_enabled: bool,
+) -> bool:
+    """Confirm that policy owns the robot while resume/slow-start is active."""
+    return bool(
+        inference_phase in {"SYNCING", "INFERENCING"}
+        and arbiter_available
+        and arbiter_mode == "POLICY"
+        and not arbiter_fault
+        and not publisher_conflict
+        and not intervention_enabled
+    )
+
+
+def gate_paused_pose_move(
+    state: SafetyState,
+    *,
+    inference_phase: str,
+    inference_status_ready: bool,
+    recording_phase: str,
+    recording_status_ready: bool,
+    intervention_active: bool,
+    arbiter_available: bool,
+    arbiter_mode: str,
+    arbiter_fault: str,
+    publisher_conflict: str,
+    intervention_enabled: bool,
+) -> GateResult:
+    """Allow a bounded custom pose move only from a fully quiet non-running state."""
+    failures: list[str] = []
+    warnings: list[str] = []
+    if not state.physical_control_enabled:
+        failures.append("서버의 물리 제어 기능이 잠겨 있습니다.")
+    if state.estop_active:
+        failures.append("E-stop이 감지되어 초기 위치로 이동할 수 없습니다.")
+    if not state.estop_signal_ready:
+        failures.append("설정된 E-stop 감시 토픽의 최신 해제 신호를 확인할 수 없습니다.")
+    if state.critical_fault:
+        failures.append("로봇 통신 또는 하드웨어 fault가 있습니다.")
+    if state.selected_follower != "f2":
+        failures.append("사용자 초기 위치 이동은 현재 F2에서만 지원됩니다.")
+    if not state.follower_up:
+        failures.append("Follower control stack이 실행 중이어야 합니다.")
+    else:
+        if not state.controllers_ready:
+            failures.append("Follower arm/head/lift controller가 모두 준비되지 않았습니다.")
+        if not state.feedback_fresh:
+            failures.append("Follower /joint_states feedback이 최신 상태가 아닙니다.")
+        if not state.dxl_ok:
+            failures.append("Follower DXL 통신과 hardware 상태가 정상으로 확인되지 않았습니다.")
+    if not inference_status_ready:
+        failures.append("Inference typed status를 확인할 수 없습니다.")
+    elif inference_phase not in {"PAUSED", "READY"}:
+        failures.append("Inference가 PAUSED 또는 READY(정책 미실행) 상태일 때만 초기 위치로 이동할 수 있습니다.")
+    if not recording_status_ready:
+        failures.append("Recording typed status를 확인할 수 없습니다.")
+    elif recording_phase not in {"READY", "SAVING"}:
+        failures.append("녹화를 종료한 뒤 초기 위치로 이동할 수 있습니다.")
+    if intervention_active:
+        failures.append("Intervention 세션을 먼저 종료해야 합니다.")
+    if state.leader_up and not state.leader_standby:
+        failures.append("Leader를 종료하거나 안전한 standby 상태로 전환해야 합니다.")
+    if state.command_stream_active:
+        failures.append("최근 trajectory command가 남아 있어 초기 위치로 이동할 수 없습니다.")
+    if state.operation_running or state.control_busy:
+        failures.append("다른 로봇 제어 작업이 진행 중입니다.")
+    if not arbiter_available:
+        failures.append("Command arbiter 상태를 확인할 수 없습니다.")
+    elif arbiter_mode != "NONE":
+        failures.append("Command arbiter가 NONE 상태일 때만 초기 위치로 이동할 수 있습니다.")
+    if arbiter_fault:
+        failures.append(f"Command arbiter fault({arbiter_fault})")
+    if publisher_conflict:
+        failures.append("최종 command publisher 충돌이 있습니다.")
+    if intervention_enabled:
+        failures.append("Intervention routing lease가 아직 활성화되어 있습니다.")
+    if not failures:
+        warnings.append("입력한 joint-space 경로의 작업 공간 충돌 여부를 현장에서 확인해야 합니다.")
+    return GateResult(not failures, tuple(failures), tuple(warnings))
 
 
 def gate_intervention_start(state: SafetyState, inference_phase: str) -> GateResult:
@@ -164,7 +272,7 @@ def gate_intervention_start(state: SafetyState, inference_phase: str) -> GateRes
         failures.append("실행 중인 Inference session이 없습니다.")
     if inference_phase != "PAUSED":
         failures.append("Inference가 PAUSED로 확인된 뒤 Intervention을 시작할 수 있습니다.")
-    if state.leader_up or state.leader_stream_active:
+    if (state.leader_up or state.leader_stream_active) and not state.leader_standby:
         failures.append("Leader가 이미 켜져 있거나 command stream이 남아 있습니다.")
     # Policy publishers may remain connected while the warm model is paused.
     # Only a recent message is unsafe for this hand-off.
@@ -183,18 +291,174 @@ def gate_intervention_reset(
     leader_up: bool,
     command_recent: bool,
     recording_phase: str,
+    leader_standby: bool = False,
 ) -> GateResult:
     """Allow a faulted hand-off to return to a fresh inference start safely."""
     failures: list[str] = []
     if phase not in {"PAUSED_SAFE", "READY_TO_RESUME"}:
         failures.append("안전 중단 또는 Resume 대기 상태에서만 Intervention을 초기화할 수 있습니다.")
-    if leader_up:
+    if leader_up and not leader_standby:
         failures.append("Leader가 실행 중이므로 Intervention을 초기화할 수 없습니다.")
     if command_recent:
         failures.append("최근 trajectory command가 남아 있어 Intervention을 초기화할 수 없습니다.")
     if recording_phase == "RECORDING":
         failures.append("Intervention recording을 먼저 취소하거나 저장해야 합니다.")
     return GateResult(not failures, tuple(failures))
+
+
+def gate_arbiter_fault_reset(
+    *,
+    inference_phase: str,
+    inference_status_ready: bool,
+    leader_up: bool,
+    command_recent: bool,
+    recording_phase: str,
+    arbiter_available: bool,
+    arbiter_mode: str,
+    publisher_conflict: str,
+    leader_standby: bool = False,
+) -> GateResult:
+    """Clear a latched routing fault only from a proved command-quiet state."""
+    failures: list[str] = []
+    # Clearing a fault never selects a command route: the arbiter remains in
+    # NONE. It is therefore safe before a robot/inference session publishes
+    # its first typed status, provided no runtime is actively transitioning.
+    if inference_phase in {"LOADING", "SYNCING", "INFERENCING"}:
+        failures.append("Inference가 실행 또는 전환 중일 때는 arbiter fault를 초기화할 수 없습니다.")
+    if leader_up and not leader_standby:
+        failures.append("Leader가 실행 중이므로 arbiter fault를 초기화할 수 없습니다.")
+    if command_recent:
+        failures.append("최근 trajectory command가 남아 있어 arbiter fault를 초기화할 수 없습니다.")
+    if recording_phase == "RECORDING":
+        failures.append("진행 중인 recording을 먼저 취소하거나 저장해야 합니다.")
+    if not arbiter_available:
+        failures.append("Command arbiter 상태를 확인할 수 없습니다.")
+    if arbiter_mode != "NONE":
+        failures.append("Command arbiter가 NONE일 때만 fault를 초기화할 수 있습니다.")
+    if publisher_conflict:
+        failures.append("최종 trajectory 토픽에 중복 publisher가 남아 있습니다.")
+    return GateResult(not failures, tuple(failures))
+
+
+def gate_intervention_preflight(
+    *,
+    state: SafetyState,
+    inference_phase: str,
+    inference_status_ready: bool,
+    recording_phase: str,
+    recording_status_ready: bool,
+    arbiter_available: bool,
+    arbiter_mode: str,
+    arbiter_fault: str,
+    publisher_conflict: str,
+    intervention_enabled: bool,
+) -> GateResult:
+    """Validate the static hand-off contract before pausing a live policy."""
+    failures: list[str] = []
+    if not state.physical_control_enabled:
+        failures.append("서버의 물리 제어 기능이 잠겨 있습니다.")
+    if state.estop_active:
+        failures.append("E-stop이 감지되어 Intervention을 시작할 수 없습니다.")
+    if not state.estop_signal_ready:
+        failures.append("설정된 E-stop 감시 토픽의 최신 해제 신호를 확인할 수 없습니다.")
+    if state.critical_fault:
+        failures.append("로봇 통신 또는 하드웨어 fault가 있습니다.")
+    if state.selected_follower != "f2":
+        failures.append("Intervention은 현재 F2에서만 지원됩니다.")
+    if not state.follower_up:
+        failures.append("Follower가 실행 중이어야 합니다.")
+    elif not (state.controllers_ready and state.feedback_fresh and state.dxl_ok):
+        failures.append("Follower controller, joint feedback, DXL 상태가 모두 정상이어야 합니다.")
+    if (state.leader_up or state.leader_stream_active) and not state.leader_standby:
+        failures.append("기존 Leader를 먼저 종료해야 합니다.")
+    if state.operation_running or state.control_busy:
+        failures.append("다른 로봇 제어 작업이 진행 중입니다.")
+    if not state.inference_present:
+        failures.append("실행 중인 Inference session이 없습니다.")
+    if not inference_status_ready:
+        failures.append("Inference typed status를 확인할 수 없습니다.")
+    if inference_phase not in {"INFERENCING", "PAUSED"}:
+        failures.append("Inference가 INFERENCING 또는 PAUSED 상태여야 합니다.")
+    if not recording_status_ready:
+        failures.append("Recording typed status를 확인할 수 없습니다.")
+    if recording_phase not in {"READY", "RECORDING"}:
+        failures.append("Recording이 READY 또는 연속 수집 중인 RECORDING 상태여야 합니다.")
+    if not arbiter_available:
+        failures.append("Command arbiter 상태를 확인할 수 없습니다.")
+    if arbiter_fault:
+        failures.append(f"Command arbiter fault가 남아 있습니다: {arbiter_fault}")
+    if publisher_conflict:
+        failures.append(f"최종 trajectory 토픽 publisher 충돌이 있습니다: {publisher_conflict}")
+    expected_modes = {"POLICY", "NONE"} if inference_phase == "INFERENCING" else {"NONE"}
+    if arbiter_mode not in expected_modes:
+        failures.append(
+            "Command arbiter mode가 Intervention hand-off 조건과 일치하지 않습니다."
+        )
+    if intervention_enabled:
+        failures.append("이전 Intervention routing lease가 아직 활성화되어 있습니다.")
+    return GateResult(not failures, tuple(failures))
+
+
+def gate_leader_standby_start(
+    *,
+    state: SafetyState,
+    inference_phase: str,
+    inference_status_ready: bool,
+    recording_phase: str,
+    recording_status_ready: bool,
+    arbiter_available: bool,
+    arbiter_mode: str,
+    arbiter_fault: str,
+    publisher_conflict: str,
+    intervention_enabled: bool,
+) -> GateResult:
+    """Allow an isolated Leader to warm without changing command ownership."""
+    failures: list[str] = []
+    warnings: list[str] = []
+    if not state.physical_control_enabled:
+        failures.append("서버의 물리 제어 기능이 잠겨 있습니다.")
+    if state.estop_active:
+        failures.append("E-stop이 감지되어 Leader standby를 시작할 수 없습니다.")
+    if not state.estop_signal_ready:
+        failures.append("설정된 E-stop 감시 토픽의 최신 해제 신호를 확인할 수 없습니다.")
+    if state.critical_fault:
+        failures.append("로봇 통신 또는 하드웨어 fault가 있습니다.")
+    if state.selected_follower != "f2":
+        failures.append("Leader standby는 현재 F2에서만 지원됩니다.")
+    if not state.follower_up:
+        failures.append("Follower가 실행 중이어야 합니다.")
+    elif not (state.controllers_ready and state.feedback_fresh and state.dxl_ok):
+        failures.append("Follower controller, joint feedback, DXL 상태가 모두 정상이어야 합니다.")
+    if state.leader_up:
+        failures.append("Leader가 이미 실행 중입니다.")
+    if state.operation_running or state.control_busy:
+        failures.append("다른 로봇 제어 작업이 진행 중입니다.")
+    if not state.inference_present:
+        failures.append("실행 중인 Inference session이 없습니다.")
+    if not inference_status_ready:
+        failures.append("Inference typed status를 확인할 수 없습니다.")
+    if inference_phase not in {"READY", "INFERENCING", "PAUSED", "CONNECTED"}:
+        failures.append(
+            "Inference가 READY, INFERENCING, PAUSED 또는 안전한 CONNECTED 상태여야 합니다."
+        )
+    if not recording_status_ready or recording_phase not in {"READY", "RECORDING"}:
+        failures.append("Recording이 READY 또는 연속 수집 중인 RECORDING 상태여야 합니다.")
+    if not arbiter_available:
+        failures.append("Command arbiter 상태를 확인할 수 없습니다.")
+    if arbiter_fault:
+        failures.append(f"Command arbiter fault가 남아 있습니다: {arbiter_fault}")
+    if publisher_conflict:
+        failures.append(f"최종 trajectory 토픽 publisher 충돌이 있습니다: {publisher_conflict}")
+    expected_mode = "POLICY" if inference_phase == "INFERENCING" else "NONE"
+    if arbiter_mode != expected_mode:
+        failures.append(
+            "Command arbiter mode가 Leader standby 조건과 일치하지 않습니다."
+        )
+    if intervention_enabled:
+        failures.append("Intervention routing이 활성화된 동안 standby를 시작할 수 없습니다.")
+    if not failures:
+        warnings.append("Leader 출력은 격리되며 command ownership은 변경되지 않습니다.")
+    return GateResult(not failures, tuple(failures), tuple(warnings))
 
 
 def gate_action(action: str, state: SafetyState) -> GateResult:

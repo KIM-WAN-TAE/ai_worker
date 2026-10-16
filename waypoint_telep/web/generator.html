@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Drill Waypoint Generator</title>
+  <link rel="stylesheet" href="/generator.css?v=f2-single-port-20261013-1">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/generator" aria-label="드릴 경로 생성기 홈">
+      <span class="brand-mark">DG</span>
+      <span><strong>Drill Waypoint Generator</strong><small>파지 오차 기반 전체 경로 재계획</small></span>
+    </a>
+    <nav>
+      <a href="/">Waypoint Teleop 열기</a>
+      <span id="connectionBadge" class="badge waiting">연결 확인 중</span>
+    </nav>
+  </header>
+
+  <main>
+    <section class="hero">
+      <div>
+        <span class="eyebrow">WAYPOINT GENERATOR</span>
+        <h1>드릴 waypoint 보정 생성기</h1>
+        <p>기준 경로에 새 파지 위치의 상대 차이를 적용하고, 전체 경로의 IK를 다시 계산합니다. 실제 로봇 명령은 전송하지 않습니다.</p>
+      </div>
+      <div class="formula-card">
+        <span>계산 기준</span>
+        <code>W<sub>new,i</sub> = W<sub>ref,i</sub> · C</code>
+        <p><b>C = G<sub>ref</sub><sup>−1</sup>G<sub>new</sub></b> · EE 로컬 XYZ(mm)</p>
+      </div>
+    </section>
+
+    <section class="layout">
+      <div class="steps">
+        <article class="card" id="fileCard">
+          <div class="step-heading">
+            <span class="step-number">01</span>
+            <div><h2>기준 경로 불러오기</h2><p><code>ai_worker_waypoints/v1</code> JSON을 선택합니다.</p></div>
+          </div>
+          <label class="file-drop" for="referenceFile">
+            <input id="referenceFile" type="file" accept="application/json,.json">
+            <span>JSON 파일 선택</span>
+            <strong id="fileName">기준 waypoint 파일을 놓거나 선택하세요</strong>
+            <small>파일은 생성 버튼을 누르기 전까지 브라우저 안에서만 읽습니다.</small>
+          </label>
+          <div id="fileSummary" class="file-summary empty">아직 불러온 경로가 없습니다.</div>
+        </article>
+
+        <article class="card disabled" id="referenceCard">
+          <div class="step-heading">
+            <span class="step-number">02</span>
+            <div><h2>기준 파지 완료 지점 지정</h2><p>드릴을 완전히 잡은 waypoint 하나만 지정합니다.</p></div>
+          </div>
+          <div class="reference-grid single-reference">
+            <label><span>파지 완료 waypoint</span><input id="graspCompleteWaypoint" type="number" min="1" step="1" placeholder="직접 입력"></label>
+          </div>
+          <div id="candidateHint" class="hint">자동으로 선택하지 않습니다. 영상과 gripper 값을 확인해 파지가 완료된 번호를 직접 입력하세요.</div>
+          <label class="confirm-row">
+            <input id="graspConfirmed" type="checkbox">
+            <span><strong>직접 입력한 파지 완료 시점을 확인했습니다.</strong><small>기준 데이터의 gripper 변화와 실제 영상을 함께 확인하세요.</small></span>
+          </label>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>No.</th><th>이름</th><th>Gripper</th><th>이전 대비</th></tr></thead>
+              <tbody id="waypointRows"><tr><td colspan="4">기준 경로를 먼저 불러오세요.</td></tr></tbody>
+            </table>
+          </div>
+        </article>
+
+        <article class="card disabled" id="offsetCard">
+          <div class="step-heading">
+            <span class="step-number">03</span>
+            <div><h2>3D에서 새 파지 위치 조정</h2><p>아래 버튼을 누르면 3D의 보정 pose가 바로 이동합니다.</p></div>
+          </div>
+          <div class="axis-callout">
+            <div class="axis-glyph" aria-hidden="true"><i class="x"></i><i class="y"></i><i class="z"></i><b>EE</b></div>
+            <p>앞·뒤와 상·하는 로봇 설치 방향이 아니라 <b>기준 파지 시점의 EE 로컬축</b>으로 결정됩니다. Teleop 3D 화면에서 빨강 X, 초록 Y, 파랑 Z를 확인한 뒤 해당 칸에 부호를 포함해 입력하세요.</p>
+          </div>
+          <div class="offset-nudges" aria-label="EE 로컬축 0.5 mm 단위 조정">
+            <button class="nudge x" type="button" data-axis="0" data-delta="-0.5">X −0.5</button>
+            <button class="nudge x" type="button" data-axis="0" data-delta="0.5">X +0.5</button>
+            <button class="nudge y" type="button" data-axis="1" data-delta="-0.5">Y −0.5</button>
+            <button class="nudge y" type="button" data-axis="1" data-delta="0.5">Y +0.5</button>
+            <button class="nudge z" type="button" data-axis="2" data-delta="-0.5">Z −0.5</button>
+            <button class="nudge z" type="button" data-axis="2" data-delta="0.5">Z +0.5</button>
+            <button id="resetOffset" class="nudge reset" type="button">보정값 초기화</button>
+          </div>
+          <div class="offset-grid">
+            <label class="x-axis"><span>로컬 X <b>mm</b></span><input id="offsetX" type="number" min="-50" max="50" step="0.5" value="0"></label>
+            <label class="y-axis"><span>로컬 Y <b>mm</b></span><input id="offsetY" type="number" min="-50" max="50" step="0.5" value="0"></label>
+            <label class="z-axis"><span>로컬 Z <b>mm</b></span><input id="offsetZ" type="number" min="-50" max="50" step="0.5" value="0"></label>
+          </div>
+          <p class="limit-note">3D의 청록색은 기준 경로, 분홍색은 보정 경로입니다. 합성 보정량은 최대 50 mm이며, 파지 방향은 같고 위치만 달라진 경우를 대상으로 합니다.</p>
+        </article>
+      </div>
+
+      <aside class="preview-column">
+        <article class="card preview-card">
+          <div class="step-heading compact">
+            <span class="step-number">04</span>
+            <div><h2>경로 생성 및 검증</h2><p>상대 보정, 전체 IK 계산, Teleop Preview 검증을 한 번에 수행합니다.</p></div>
+          </div>
+          <div class="simulation-toolbar">
+            <div class="pose-source" role="group" aria-label="3D 로봇 자세 선택">
+              <button id="showReferencePose" class="pose-source-button active" type="button">기준 자세</button>
+              <button id="showCorrectedPose" class="pose-source-button" type="button" disabled>보정 자세</button>
+            </div>
+            <button id="reset3dView" class="button ghost compact-button" type="button">시점 초기화</button>
+          </div>
+          <div class="simulation-stage">
+            <canvas id="robotSimulation" height="460" aria-label="기준 경로와 보정 경로의 F2 3D 로봇 시뮬레이션"></canvas>
+            <div id="simulationEmpty" class="simulation-empty">
+              <strong>F2 전체 URDF를 기다리고 있습니다.</strong>
+              <span>현재 로봇 자세와 mesh를 불러오는 중입니다.</span>
+            </div>
+            <div class="view-help">빈 공간 드래그: 시점 회전 · 휠: 확대/축소</div>
+            <div class="simulation-legend">
+              <span><i class="legend-link"></i>F2 URDF mesh</span>
+              <span><i class="legend-reference"></i>기준 경로</span>
+              <span><i class="legend-corrected"></i>보정 경로</span>
+              <span><i class="legend-axis-x"></i>X</span>
+              <span><i class="legend-axis-y"></i>Y</span>
+              <span><i class="legend-axis-z"></i>Z</span>
+              <span>작은 XYZ 축: waypoint pose</span>
+            </div>
+          </div>
+          <div class="waypoint-scrubber">
+            <input id="simulationWaypoint" type="range" min="1" max="1" value="1" disabled aria-label="3D로 표시할 waypoint 번호">
+            <strong id="simulationWaypointLabel">Waypoint를 불러오세요</strong>
+          </div>
+          <div class="model-status"><span id="modelBadge" class="badge waiting">URDF 대기 중</span><p id="modelMeta">Cyclo와 동일한 F2 전체 로봇 모델을 사용합니다.</p></div>
+          <div id="correctionSummary" class="correction-summary">기준 파일과 보정값을 입력하면 예상 경로가 표시됩니다.</div>
+          <div class="generate-actions">
+            <button id="generateButton" class="button primary" disabled>보정 · IK · Preview 검증 후 Teleop 적용</button>
+            <button id="downloadButton" class="button secondary download-button" type="button" disabled title="검증된 최종 waypoint JSON 저장">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0 0 5-5m-5 5-5-5M5 19h14"/></svg>
+              <span>검증된 JSON 저장</span>
+            </button>
+          </div>
+          <p class="replace-warning">성공하면 검증된 1→마지막 waypoint가 Teleop 목록에 유지됩니다. 생성과 Preview 중에는 실제 로봇 명령을 보내지 않습니다.</p>
+        </article>
+
+        <article id="resultCard" class="card result-card" hidden>
+          <span class="result-kicker">VALIDATED</span>
+          <h2>IK와 Teleop Preview 검증을 통과했습니다.</h2>
+          <p id="resultMessage"></p>
+          <div class="result-actions">
+            <button id="previewButton" class="button secondary">Teleop Preview 다시 검증</button>
+            <a class="button ghost" href="/">Waypoint Teleop으로 이동</a>
+          </div>
+          <div id="previewResult" class="preview-result">현재 Teleop 목록에도 검증된 최종 경로가 적용되어 있습니다.</div>
+        </article>
+
+        <article class="safety-card">
+          <strong>실행 전 확인</strong>
+          <p>Teleop Preview는 전체 보간 구간의 IK, 관절 제한, 관절값 연속성을 검사합니다. 드릴·지그·나사와의 충돌, 동역학, 실제 TCP 오차는 검사하지 않으므로 실제 실행 전 저속으로 확인하세요.</p>
+        </article>
+      </aside>
+    </section>
+  </main>
+
+  <div id="toast" class="toast" role="status"></div>
+  <script src="/full_robot_simulator.bundle.js?v=f2-single-port-20261013-1"></script>
+  <script src="/generator.js?v=teleop-validation-20261013-1"></script>
+</body>
+</html>

@@ -1,0 +1,170 @@
+/**:
+  controller_manager:
+    ros__parameters:
+      # Normal BulkRead with eight motors and one SensorXEL needs more than the
+      # 10 ms timeout implied by 100 Hz on the installed OpenRB buses.
+      update_rate: 50
+      use_sim_time: false
+
+      joint_state_broadcaster:
+        type: joint_state_broadcaster/JointStateBroadcaster
+
+      joint_trajectory_command_broadcaster:
+        type: joint_trajectory_command_broadcaster/JointTrajectoryCommandBroadcaster
+
+      trigger_position_controller:
+        type: position_controllers/JointGroupPositionController
+
+      # leader_position_controller:
+      #   type: position_controllers/JointGroupPositionController
+
+      joystick_controller:
+        type: joystick_controller/JoystickController
+
+/**:
+  joint_trajectory_command_broadcaster:
+    ros__parameters:
+      left_joints:
+        - arm_l_joint1
+        - arm_l_joint2
+        - arm_l_joint3
+        - arm_l_joint4
+        - arm_l_joint5
+        - arm_l_joint6
+        - arm_l_joint7
+        - gripper_l_joint1
+      left_offsets:
+        - 0.0
+        - 0.0
+        - 0.0
+        - 0.0
+        - 0.0
+        # - 0.3
+        - 0.0
+        - 0.0
+        - 0.1
+      right_joints:
+        - arm_r_joint1
+        - arm_r_joint2
+        - arm_r_joint3
+        - arm_r_joint4
+        - arm_r_joint5
+        - arm_r_joint6
+        - arm_r_joint7
+        - gripper_r_joint1
+      right_offsets:
+        - 0.0
+        - 0.0
+        - 0.0
+        - 0.0
+        - 0.0
+        # - 0.3
+        - 0.0
+        - 0.0
+        - 0.1
+      left_joint_states_stamped_topic: "/robot/arm_left_leader/joint_states"
+      right_joint_states_stamped_topic: "/robot/arm_right_leader/joint_states"
+      left_follower_joint_states_topic: "/joint_states"
+      right_follower_joint_states_topic: "/joint_states"
+      # Cyclo RelativePoseMode-compatible end-effector mapping. Leader motion is
+      # evaluated with the Mini Leader chain; follower FK/Jacobian use the F2 chain.
+      teleop_reference_mode: "relative"
+      save_pose_duration: 2.0
+      save_pose_ids: [3, 4]
+      # s r r s r s r
+      left_save_pose_3: [-1.0713297854143506, 1.0444252005018253, -1.4848934026733007, -1.4670369075643193, 0.9795426068642248, -0.28496089979956857, -0.8665934658731904, 0.019]
+      right_save_pose_3: [0.206799784966833, -0.7173517343848337, 0.32757680356301655, -2.0146680488394932, -0.42941874680873665, -0.3036203379772087, -0.5987694600634532, 0.019]
+      left_save_pose_4: [-1.0713297854143506, 1.0444252005018253, -1.4848934026733007, -1.4670369075643193, 0.9795426068642248, -0.28496089979956857, -0.8665934658731904, 1.0]
+      right_save_pose_4: [-0.8787313, -0.419364, 0.7832051, -1.6154256, -0.9121433, 0.3984994, 0.4185584, 0.9]
+
+
+/**:
+  trigger_position_controller:
+    ros__parameters:
+      joints:
+        - gripper_r_joint1
+        - gripper_l_joint1
+
+# /**:
+#   leader_position_controller:
+#     ros__parameters:
+#       # NOTE: keep this list in sync with leader_position_command_joints above
+#       joints:
+#         - arm_r_joint1
+#         - arm_r_joint2
+#         - arm_r_joint3
+#         - arm_r_joint4
+#         - arm_r_joint5
+#         - arm_r_joint6
+#         - arm_r_joint7
+#         - arm_l_joint1
+#         - arm_l_joint2
+#         - arm_l_joint3
+#         - arm_l_joint4
+#         - arm_l_joint5
+#         - arm_l_joint6
+#         - arm_l_joint7
+
+/**:
+  joystick_controller:
+    ros__parameters:
+      joystick_sensors:
+        - sensorxel_l_joy
+        - sensorxel_r_joy
+      state_interfaces:
+        - JOYSTICK X VALUE
+        - JOYSTICK Y VALUE
+        - JOYSTICK TACT SWITCH
+      sensorxel_l_joy_reverse_interfaces:
+        - JOYSTICK Y VALUE
+        - JOYSTICK X VALUE
+      joystick_calibration_min: 0.0
+      joystick_calibration_center: 2048.0
+      joystick_calibration_max: 4096.0
+      sensorxel_l_joy_controlled_joints:
+        - head_joint1
+        - head_joint2
+      sensorxel_r_joy_controlled_joints:
+        - lift_joint
+      joint_states_topic: "/joint_states"
+      sensorxel_l_joy_joint_trajectory_topic: "/leader/joystick_controller_left/joint_trajectory"
+      sensorxel_r_joy_joint_trajectory_topic: "/leader/joystick_controller_right/joint_trajectory"
+      sensorxel_l_joy_joint_states_stamped_topic: "/robot/head_leader/joint_states"
+      sensorxel_r_joy_joint_states_stamped_topic: "/robot/lift_leader/joint_states"
+      sensorxel_l_joy_jog_scale: 0.06
+      sensorxel_r_joy_jog_scale: 0.01
+      deadzone: 0.05
+      enable_joystick_update: true
+      # Keep SensorXEL-driven auxiliary joints and mobile-base commands disabled.
+      enable_joint_jog_update: false
+      enable_cmd_vel_update: false
+      require_middle_pedal_for_cmd_vel: true
+      middle_pedal_timeout_sec: 0.5
+      # SG2-only random base repositioning; disable when paired with another follower.
+      enable_random_base_reposition: false
+      random_base_odom_topic: "/odom"
+      random_base_odom_frame: "odom"
+      random_base_child_frame: "base_link"
+      random_base_radius: 0.03
+      random_base_yaw_range: 0.087
+      random_base_linear_gain: 2.0
+      random_base_angular_gain: 2.0
+      random_base_min_linear_speed: 0.04
+      random_base_max_linear_speed: 0.15
+      random_base_min_angular_speed: 0.06
+      random_base_max_angular_speed: 0.30
+      random_base_max_linear_acceleration: 0.20
+      random_base_max_angular_acceleration: 0.40
+      random_base_position_tolerance: 0.004
+      random_base_yaw_tolerance: 0.009
+      random_base_settle_linear_velocity: 0.01
+      random_base_settle_angular_velocity: 0.02
+      random_base_settle_duration: 0.2
+      random_base_odom_stale_timeout: 0.2
+      random_base_motion_timeout: 5.0
+      random_base_anchor_position_limit: 0.05
+      random_base_anchor_yaw_limit: 0.105
+      random_base_reanchor_distance: 0.20
+      random_base_reanchor_stationary_duration: 0.2
+      random_base_odom_jump_position: 0.05
+      random_base_odom_jump_yaw: 0.175

@@ -42,6 +42,15 @@ def generate_launch_description():
             description='Right leader output; command arbitration may route it as teleop.',
         ),
         DeclareLaunchArgument(
+            'teleop_reference_mode',
+            default_value='absolute',
+            choices=['relative', 'absolute'],
+            description=(
+                'Leader-to-follower mapping mode. Intervention starts A3 in relative mode '
+                'so each arm anchors at its enable-time pose.'
+            ),
+        ),
+        DeclareLaunchArgument(
             'use_mock_hardware',
             default_value='false',
             description='Use mock hardware mirroring command.',
@@ -66,6 +75,7 @@ def generate_launch_description():
     description_file = LaunchConfiguration('description_file')
     left_trajectory_output_topic = LaunchConfiguration('left_trajectory_output_topic')
     right_trajectory_output_topic = LaunchConfiguration('right_trajectory_output_topic')
+    teleop_reference_mode = LaunchConfiguration('teleop_reference_mode')
     use_mock_hardware = LaunchConfiguration('use_mock_hardware')
     port_name = LaunchConfiguration('port_name')
     launch_foot_switch = LaunchConfiguration('launch_foot_switch')
@@ -122,6 +132,7 @@ def generate_launch_description():
             'spring_actuator_controller',
             'joystick_controller',
             'joint_state_broadcaster',
+            ['--controller-ros-args=-p teleop_reference_mode:=', teleop_reference_mode],
         ],
         parameters=[robot_description],
     )

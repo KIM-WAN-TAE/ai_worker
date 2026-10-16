@@ -24,13 +24,16 @@ from trajectory_msgs.msg import JointTrajectory
 MODE_NONE = "NONE"
 MODE_POLICY = "POLICY"
 MODE_TELEOP = "TELEOP"
+MODE_WAYPOINT = "WAYPOINT"
 ARMS = ("left", "right")
+COMMAND_MODES = (MODE_POLICY, MODE_TELEOP, MODE_WAYPOINT)
 
 
 @dataclass
 class SourceSample:
     message: Optional[JointTrajectory] = None
     seen_s: Optional[float] = None
+    lease_until_s: Optional[float] = None
     error: str = "not received"
 
 
@@ -43,6 +46,9 @@ class CommandSourceArbiterCore:
         *,
         max_age_s: float = 0.25,
         max_pair_skew_s: float = 0.05,
+        max_command_lease_s: float = 60.0,
+        command_lease_grace_s: float = 0.1,
+        policy_trajectory_completion_grace_s: float = 5.0,
         position_limits: Optional[dict[str, list[tuple[float, float]]]] = None,
     ) -> None:
         self.joint_names = {arm: list(joint_names[arm]) for arm in ARMS}
@@ -73,11 +79,35 @@ class CommandSourceArbiterCore:
             self.position_limits = normalized_limits
         self.max_age_s = max(0.01, float(max_age_s))
         self.max_pair_skew_s = max(0.0, float(max_pair_skew_s))
+        self.max_command_lease_s = float(max_command_lease_s)
+        self.command_lease_grace_s = float(command_lease_grace_s)
+        self.policy_trajectory_completion_grace_s = float(
+            policy_trajectory_completion_grace_s
+        )
+        if (
+            not math.isfinite(self.max_command_lease_s)
+            or self.max_command_lease_s <= 0.0
+        ):
+            raise ValueError("max_command_lease_s must be positive and finite")
+        if (
+            not math.isfinite(self.command_lease_grace_s)
+            or self.command_lease_grace_s < 0.0
+        ):
+            raise ValueError("command_lease_grace_s must be finite and non-negative")
+        if (
+            not math.isfinite(self.policy_trajectory_completion_grace_s)
+            or self.policy_trajectory_completion_grace_s < 0.0
+        ):
+            raise ValueError(
+                "policy_trajectory_completion_grace_s must be finite and "
+                "non-negative"
+            )
         self.mode = MODE_NONE
         self.fault = ""
+        self._pair_skew_started_s: Optional[float] = None
         self.samples = {
             source: {arm: SourceSample() for arm in ARMS}
-            for source in (MODE_POLICY, MODE_TELEOP)
+            for source in COMMAND_MODES
         }
 
     @staticmethod
@@ -85,7 +115,7 @@ class CommandSourceArbiterCore:
         """Map one ownership mode and arm to its physical input source."""
         if arm not in ARMS:
             raise ValueError(f"unknown arm: {arm}")
-        if mode in (MODE_POLICY, MODE_TELEOP):
+        if mode in COMMAND_MODES:
             return mode
         raise ValueError(f"unknown ownership mode: {mode}")
 
@@ -96,6 +126,11 @@ class CommandSourceArbiterCore:
         sample = self.samples[source][arm]
         sample.message = copy.deepcopy(msg) if not error else None
         sample.seen_s = float(now_s)
+        sample.lease_until_s = (
+            float(now_s) + self._command_lease_duration_s(source, msg)
+            if not error
+            else None
+        )
         sample.error = error
         active_source = None
         if self.mode != MODE_NONE:
@@ -129,10 +164,55 @@ class CommandSourceArbiterCore:
                         f"position limit violation: {name}={numeric:.9f} "
                         f"outside [{lower:.9f}, {upper:.9f}]"
                     )
+        duration_error = self._duration_error(points[0])
+        if duration_error:
+            return duration_error
+        return ""
+
+    def _command_lease_duration_s(
+        self,
+        source: str,
+        msg: JointTrajectory,
+    ) -> float:
+        point = list(getattr(msg, "points", []) or [None])[0]
+        duration = getattr(point, "time_from_start", None)
+        sec = int(getattr(duration, "sec", 0) or 0)
+        nanosec = int(getattr(duration, "nanosec", 0) or 0)
+        trajectory_s = float(sec) + float(nanosec) / 1_000_000_000.0
+        grace_s = self.command_lease_grace_s
+        # Initial-pose synchronization is a finite POLICY trajectory.  Once it
+        # reaches its endpoint, the runtime must observe the settled robot and
+        # run one fresh inference before it can publish the streaming policy.
+        # Keep the completed target selected for that bounded calculation gap;
+        # ordinary zero-duration streaming commands retain the short watchdog
+        # grace and still fail closed promptly.
+        if source == MODE_POLICY and trajectory_s > 0.0:
+            grace_s = max(
+                grace_s,
+                self.policy_trajectory_completion_grace_s,
+            )
+        return max(
+            self.max_age_s,
+            min(trajectory_s, self.max_command_lease_s)
+            + grace_s,
+        )
+
+    def _duration_error(self, point) -> str:
+        duration = getattr(point, "time_from_start", None)
+        sec = int(getattr(duration, "sec", 0) or 0)
+        nanosec = int(getattr(duration, "nanosec", 0) or 0)
+        if sec < 0 or nanosec < 0 or nanosec >= 1_000_000_000:
+            return "invalid time_from_start"
+        duration_s = float(sec) + float(nanosec) / 1_000_000_000.0
+        if duration_s > self.max_command_lease_s:
+            return (
+                f"time_from_start {duration_s:.3f}s exceeds "
+                f"{self.max_command_lease_s:.3f}s lease limit"
+            )
         return ""
 
     def readiness(self, mode: str, now_s: float) -> tuple[bool, str]:
-        if mode not in (MODE_POLICY, MODE_TELEOP):
+        if mode not in COMMAND_MODES:
             return False, f"unknown ownership mode {mode}"
         seen = []
         for arm in ARMS:
@@ -158,33 +238,76 @@ class CommandSourceArbiterCore:
         if not ready:
             self.mode = MODE_NONE
             return False, reason
+        # A cached trajectory starts at the controller only when selection
+        # forwards it. Anchor its lease to this handoff, not to cache receipt.
+        for arm in ARMS:
+            source = self.source_for_arm(mode, arm)
+            sample = self.samples[source][arm]
+            sample.lease_until_s = (
+                float(now_s)
+                + self._command_lease_duration_s(source, sample.message)
+            )
         self.mode = mode
+        self._pair_skew_started_s = None
         return True, f"selected {mode}"
 
     def select_none(self) -> None:
         self.mode = MODE_NONE
+        self._pair_skew_started_s = None
 
     def clear_fault(self) -> None:
         self.fault = ""
         self.mode = MODE_NONE
+        self._pair_skew_started_s = None
 
     def latch_fault(self, reason: str) -> None:
         self.fault = str(reason)
         self.mode = MODE_NONE
+        self._pair_skew_started_s = None
 
     def watchdog(self, now_s: float) -> tuple[bool, str]:
         if self.mode == MODE_NONE:
             return True, "idle"
         active = self.mode
-        ready, reason = self.readiness(active, now_s)
-        if not ready:
+        seen = []
+        for arm in ARMS:
+            source = self.source_for_arm(active, arm)
+            sample = self.samples[source][arm]
+            if sample.error:
+                reason = f"{arm}/{source.lower()}: {sample.error}"
+                self.latch_fault(f"{active.lower()} lease lost: {reason}")
+                return False, self.fault
+            if sample.seen_s is None or sample.lease_until_s is None:
+                reason = f"{arm}/{source.lower()}: not received"
+                self.latch_fault(f"{active.lower()} lease lost: {reason}")
+                return False, self.fault
+            if float(now_s) > sample.lease_until_s:
+                age = max(0.0, float(now_s) - sample.seen_s)
+                reason = f"{arm}/{source.lower()}: stale ({age:.3f}s)"
+                self.latch_fault(f"{active.lower()} lease lost: {reason}")
+                return False, self.fault
+            seen.append(sample.seen_s)
+        skew = max(seen) - min(seen)
+        if skew > self.max_pair_skew_s:
+            if self._pair_skew_started_s is None:
+                self._pair_skew_started_s = float(now_s)
+                return True, "arm pair skew grace"
+            skew_duration = max(
+                0.0, float(now_s) - self._pair_skew_started_s)
+            if skew_duration <= self.max_pair_skew_s:
+                return True, "arm pair skew grace"
+            reason = (
+                f"arm pair skew {skew:.3f}s exceeds "
+                f"{self.max_pair_skew_s:.3f}s for {skew_duration:.3f}s"
+            )
             self.latch_fault(f"{active.lower()} lease lost: {reason}")
             return False, self.fault
+        self._pair_skew_started_s = None
         return True, "ready"
 
     def status(self, now_s: float) -> dict:
         sources = {}
-        for mode in (MODE_POLICY, MODE_TELEOP):
+        for mode in COMMAND_MODES:
             ready, reason = self.readiness(mode, now_s)
             sources[mode.lower()] = {"ready": ready, "reason": reason}
         return {"mode": self.mode, "fault": self.fault, "sources": sources}
@@ -203,27 +326,30 @@ class CommandSourceArbiter(Node):
             "arm_r_joint5", "arm_r_joint6", "arm_r_joint7", "gripper_r_joint1",
         ],
     }
-    # Effective F2 limits. J7 uses the installed PH42 tick ranges rather than
-    # the wider nominal URDF limits; an out-of-range chunk is rejected whole.
+    # Effective F2 limits. J7 uses the nominal mechanism envelope; the PH42
+    # EEPROM bounds include these endpoints by rounding raw ticks outward.
+    # An out-of-range chunk is rejected whole. Gripper bounds remain the
+    # URDF/software contract because the current F2 ros2_control configuration
+    # has no gripper raw limit items.
     F2_POSITION_LIMITS = {
         "left": [
-            (-math.pi, math.pi),
-            (0.0, math.pi),
-            (-math.pi, math.pi),
-            (-2.93613510181236, 1.0785802414820915),
-            (-math.pi, math.pi),
-            (-math.pi / 2.0, math.pi / 2.0),
-            (-math.pi / 2.0, 1.3639424895214947),
+            (-3.14, 3.14),
+            (0.0, 3.14),
+            (-3.14, 3.14),
+            (-2.9361, 1.0785802414820915),
+            (-3.14, 3.14),
+            (-1.57, 1.57),
+            (-1.8201, 1.5804),
             (0.0, 1.1),
         ],
         "right": [
-            (-math.pi, math.pi),
-            (-math.pi, 0.0),
-            (-math.pi, math.pi),
-            (-2.93613510181236, 1.0785802414820915),
-            (-math.pi, math.pi),
-            (-math.pi / 2.0, math.pi / 2.0),
-            (-1.3639424895214947, math.pi / 2.0),
+            (-3.14, 3.14),
+            (-3.14, 0.0),
+            (-3.14, 3.14),
+            (-2.9361, 1.0785802414820915),
+            (-3.14, 3.14),
+            (-1.57, 1.57),
+            (-1.5804, 1.8201),
             (0.0, 1.1),
         ],
     }
@@ -232,12 +358,17 @@ class CommandSourceArbiter(Node):
         super().__init__("command_source_arbiter")
         self.declare_parameter("max_source_age_s", 0.25)
         self.declare_parameter("max_pair_skew_s", 0.05)
+        self.declare_parameter("max_command_lease_s", 60.0)
+        self.declare_parameter("command_lease_grace_s", 0.1)
+        self.declare_parameter("policy_trajectory_completion_grace_s", 5.0)
         self.declare_parameter("manage_leader_service", True)
         self.declare_parameter("leader_service_name", "avatar_bringup")
         self.declare_parameter("policy_left_topic", "/intervention/policy/arm_left")
         self.declare_parameter("policy_right_topic", "/intervention/policy/arm_right")
         self.declare_parameter("teleop_left_topic", "/intervention/teleop/arm_left")
         self.declare_parameter("teleop_right_topic", "/intervention/teleop/arm_right")
+        self.declare_parameter("waypoint_left_topic", "/intervention/waypoint/arm_left")
+        self.declare_parameter("waypoint_right_topic", "/intervention/waypoint/arm_right")
         self.declare_parameter(
             "final_left_topic",
             "/leader/joint_trajectory_command_broadcaster_left/joint_trajectory",
@@ -245,6 +376,14 @@ class CommandSourceArbiter(Node):
         self.declare_parameter(
             "final_right_topic",
             "/leader/joint_trajectory_command_broadcaster_right/joint_trajectory",
+        )
+        self.declare_parameter(
+            "executed_action_left_topic",
+            "/command_source_arbiter/executed/arm_left",
+        )
+        self.declare_parameter(
+            "executed_action_right_topic",
+            "/command_source_arbiter/executed/arm_right",
         )
         self.declare_parameter("left_joint_names", self.DEFAULT_JOINTS["left"])
         self.declare_parameter("right_joint_names", self.DEFAULT_JOINTS["right"])
@@ -257,6 +396,17 @@ class CommandSourceArbiter(Node):
             joints,
             max_age_s=float(self.get_parameter("max_source_age_s").value),
             max_pair_skew_s=float(self.get_parameter("max_pair_skew_s").value),
+            max_command_lease_s=float(
+                self.get_parameter("max_command_lease_s").value
+            ),
+            command_lease_grace_s=float(
+                self.get_parameter("command_lease_grace_s").value
+            ),
+            policy_trajectory_completion_grace_s=float(
+                self.get_parameter(
+                    "policy_trajectory_completion_grace_s"
+                ).value
+            ),
             position_limits=self.F2_POSITION_LIMITS,
         )
         self._intervention_enabled = False
@@ -269,9 +419,17 @@ class CommandSourceArbiter(Node):
                 arm: str(self.get_parameter(f"teleop_{arm}_topic").value)
                 for arm in ARMS
             },
+            MODE_WAYPOINT: {
+                arm: str(self.get_parameter(f"waypoint_{arm}_topic").value)
+                for arm in ARMS
+            },
         }
         self._final_topics = {
             arm: str(self.get_parameter(f"final_{arm}_topic").value)
+            for arm in ARMS
+        }
+        self._executed_action_topics = {
+            arm: str(self.get_parameter(f"executed_action_{arm}_topic").value)
             for arm in ARMS
         }
 
@@ -280,8 +438,21 @@ class CommandSourceArbiter(Node):
             arm: self.create_publisher(JointTrajectory, self._final_topics[arm], reliable)
             for arm in ARMS
         }
+        executed_action_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self._executed_action_publishers = {
+            arm: self.create_publisher(
+                JointTrajectory,
+                self._executed_action_topics[arm],
+                executed_action_qos,
+            )
+            for arm in ARMS
+        }
         self._source_subscriptions = []
-        for source in (MODE_POLICY, MODE_TELEOP):
+        for source in COMMAND_MODES:
             for arm in ARMS:
                 self._source_subscriptions.append(self.create_subscription(
                     JointTrajectory,
@@ -307,9 +478,11 @@ class CommandSourceArbiter(Node):
         self.create_service(Trigger, "~/select_none", self._select_none)
         self.create_service(Trigger, "~/select_policy", self._select_policy)
         self.create_service(Trigger, "~/select_teleop", self._select_teleop)
+        self.create_service(Trigger, "~/select_waypoint", self._select_waypoint)
         self.create_service(Trigger, "~/clear_fault", self._clear_fault)
         self.create_service(Trigger, "~/prepare_intervention", self._prepare_intervention)
         self.create_service(Trigger, "~/disable_intervention", self._disable_intervention)
+        self.create_service(Trigger, "~/release_teleop", self._release_teleop)
         self.create_service(Trigger, "~/get_status", self._get_status)
         self.create_timer(0.05, self._watchdog)
         self.create_timer(0.2, self._publish_status)
@@ -327,8 +500,11 @@ class CommandSourceArbiter(Node):
         if self.core.mode != MODE_NONE:
             active_source = self.core.source_for_arm(self.core.mode, arm)
         if valid and active_source == source:
-            self._final_publishers[arm].publish(msg)
-        self._publish_status()
+            self._publish_executed_command(arm, msg)
+        # Status is already published by the 5 Hz timer. Publishing it for
+        # every arm sample performs graph introspection between the left and
+        # right callbacks and can itself push an otherwise valid pair beyond
+        # max_pair_skew_s when the host is busy.
 
     def _publisher_conflict(self) -> str:
         conflicts = []
@@ -340,6 +516,11 @@ class CommandSourceArbiter(Node):
                 conflicts.append(f"{arm}: {', '.join(names)}")
         return "; ".join(conflicts)
 
+    def _publish_executed_command(self, arm: str, msg: JointTrajectory) -> None:
+        """Forward one selected command and retain the exact executed action."""
+        self._final_publishers[arm].publish(msg)
+        self._executed_action_publishers[arm].publish(msg)
+
     def _select(self, source: str, response: Trigger.Response) -> Trigger.Response:
         conflict = self._publisher_conflict()
         if conflict:
@@ -348,17 +529,20 @@ class CommandSourceArbiter(Node):
             response.message = self.core.fault
             self._publish_status()
             return response
-        if source == MODE_POLICY:
+        if source in (MODE_POLICY, MODE_WAYPOINT):
             self._release_leader_arms()
         success, message = self.core.select(source, self._now_s())
         response.success = success
         response.message = message
-        if success:
+        if success and source != MODE_TELEOP:
+            # A cached TELEOP sample may predate a WAYPOINT/POLICY handoff.
+            # Wait for the next live TELEOP sample so route selection itself
+            # cannot replay that stale command and release the gripper.
             for arm in ARMS:
                 arm_source = self.core.source_for_arm(source, arm)
                 sample = self.core.samples[arm_source][arm]
                 if sample.message is not None:
-                    self._final_publishers[arm].publish(sample.message)
+                    self._publish_executed_command(arm, sample.message)
         self._publish_status()
         return response
 
@@ -366,15 +550,37 @@ class CommandSourceArbiter(Node):
         self.core.select_none()
         self._release_leader_arms()
         response.success = True
-        response.message = "selected NONE; both A3 arms released"
+        response.message = "selected NONE; both leader arms released"
         self._publish_status()
         return response
 
     def _select_policy(self, _request, response):
+        if self.core.mode == MODE_WAYPOINT:
+            response.success = False
+            response.message = "POLICY takeover from an active WAYPOINT lease is not allowed"
+            self._publish_status()
+            return response
         return self._select(MODE_POLICY, response)
 
     def _select_teleop(self, _request, response):
+        # Selecting the route must not move either arm.  The mini-leader's
+        # left/right physical buttons remain the explicit per-arm enable gate.
+        if not self._intervention_enabled:
+            response.success = False
+            response.message = (
+                "TELEOP requires an explicit prepare_intervention transition"
+            )
+            self._publish_status()
+            return response
         return self._select(MODE_TELEOP, response)
+
+    def _select_waypoint(self, _request, response):
+        if self.core.mode == MODE_POLICY:
+            response.success = False
+            response.message = "WAYPOINT takeover from POLICY is not allowed"
+            self._publish_status()
+            return response
+        return self._select(MODE_WAYPOINT, response)
 
     def _clear_fault(self, _request, response):
         self.core.clear_fault()
@@ -418,6 +624,14 @@ class CommandSourceArbiter(Node):
         self._publish_status()
         return response
 
+    def _release_teleop(self, _request, response):
+        """Disarm Leader arms without changing the selected command source."""
+        self._release_leader_arms()
+        response.success = True
+        response.message = f"leader arms released; mode remains {self.core.mode}"
+        self._publish_status()
+        return response
+
     def _get_status(self, _request, response):
         response.success = True
         response.message = json.dumps(self._status_payload(), sort_keys=True)
@@ -446,6 +660,7 @@ class CommandSourceArbiter(Node):
         payload = self.core.status(self._now_s())
         payload["intervention_enabled"] = self._intervention_enabled
         payload["final_topics"] = dict(self._final_topics)
+        payload["executed_action_topics"] = dict(self._executed_action_topics)
         payload["publisher_conflict"] = self._publisher_conflict()
         return payload
 
@@ -453,6 +668,11 @@ class CommandSourceArbiter(Node):
         message = String()
         message.data = json.dumps(self._status_payload(), sort_keys=True)
         self._status_publisher.publish(message)
+        # Record an authoritative mode sample throughout every episode, not
+        # only at the ownership transition.  This makes standalone
+        # intervention captures and Total Record timelines recoverable even
+        # when rosbag subscribes after the transition event.
+        self._publish_intervention_mode()
 
     def _change_leader_service(self, *, up: bool) -> tuple[bool, str]:
         if not bool(self.get_parameter("manage_leader_service").value):
@@ -460,7 +680,7 @@ class CommandSourceArbiter(Node):
         service = str(self.get_parameter("leader_service_name").value)
         matches = sorted(glob.glob("/package/admin/s6-*/command/s6-rc"))
         if not matches:
-            return False, "s6-rc not found; cannot manage A3 leader service"
+            return False, "s6-rc not found; cannot manage leader service"
         command = [matches[-1], "-u" if up else "-d", "change", service]
         try:
             result = subprocess.run(
@@ -477,7 +697,7 @@ class CommandSourceArbiter(Node):
             detail = (result.stderr or result.stdout or "unknown s6 error").strip()
             return False, f"leader service request failed: {detail}"
         state = "started" if up else "stopped"
-        return True, f"A3 leader service {state}; waiting for source readiness"
+        return True, f"leader service {state}; waiting for source readiness"
 
 
 def main(args=None) -> None:
@@ -489,9 +709,15 @@ def main(args=None) -> None:
         pass
     finally:
         node.core.select_none()
-        if rclpy.ok():
-            node._release_leader_arms()
+        try:
+            if rclpy.ok():
+                node._release_leader_arms()
+        except Exception:  # noqa: BLE001 - ROS context may already be invalid.
+            # SIGINT may invalidate the context before this final best-effort publish.
+            pass
+        finally:
             node.destroy_node()
+        if rclpy.ok():
             rclpy.shutdown()
 
 

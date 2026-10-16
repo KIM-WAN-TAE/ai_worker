@@ -1,0 +1,37 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="ffw_lg2_mini_leader">
+  <xacro:arg name="use_sim" default="false" />
+  <xacro:arg name="use_mock_hardware" default="false" />
+  <xacro:arg name="mock_sensor_commands" default="false" />
+  <xacro:arg name="use_sensorxel" default="false" />
+  <xacro:arg name="prefix" default="" />
+  <xacro:arg name="left_port_name" default="/dev/serial/by-id/usb-ROBOTIS_OpenRB-150_00000002-if00" />
+  <xacro:arg name="right_port_name" default="/dev/serial/by-id/usb-ROBOTIS_OpenRB-150_00000001-if00" />
+
+  <xacro:include filename="$(find ffw_description)/urdf/common/leader/ffw_mini_leader_body.urdf.xacro" />
+
+  <xacro:include filename="$(find ffw_description)/ros2_control/ffw_lg2_mini_leader/ffw_lg2_mini_leader_left.ros2_control.xacro" />
+
+  <xacro:include filename="$(find ffw_description)/ros2_control/ffw_lg2_mini_leader/ffw_lg2_mini_leader_right.ros2_control.xacro" />
+
+  <link name="world"/>
+
+  <xacro:ffw_mini_leader_body parent="$(arg prefix)world" prefix="$(arg prefix)">
+    <origin xyz="0 0 0" rpy="0 0 0" />
+  </xacro:ffw_mini_leader_body>
+
+  <xacro:ffw_lg2_mini_leader_left_system
+      use_sim="$(arg use_sim)"
+      use_mock_hardware="$(arg use_mock_hardware)"
+      mock_sensor_commands="$(arg mock_sensor_commands)"
+      use_sensorxel="$(arg use_sensorxel)"
+      port_name="$(arg left_port_name)" />
+
+  <xacro:ffw_lg2_mini_leader_right_system
+      use_sim="$(arg use_sim)"
+      use_mock_hardware="$(arg use_mock_hardware)"
+      mock_sensor_commands="$(arg mock_sensor_commands)"
+      use_sensorxel="$(arg use_sensorxel)"
+      port_name="$(arg right_port_name)" />
+
+</robot>

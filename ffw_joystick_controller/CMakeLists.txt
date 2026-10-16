@@ -64,6 +64,16 @@ target_link_libraries(joystick_controller PUBLIC
 target_compile_definitions(joystick_controller PRIVATE "joystick_controller_BUILDING_DLL")
 pluginlib_export_plugin_description_file(controller_interface joystick_plugin.xml)
 
+if(BUILD_TESTING)
+  find_package(ament_cmake_gmock REQUIRED)
+  ament_add_gmock(test_tact_switch_gate
+    test/test_tact_switch_gate.cpp
+  )
+  target_include_directories(test_tact_switch_gate PRIVATE
+    ${PROJECT_SOURCE_DIR}/include
+  )
+endif()
+
 ################################################################################
 # Install
 ################################################################################

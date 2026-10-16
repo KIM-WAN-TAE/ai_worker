@@ -37,7 +37,7 @@ class HandoffProbe(Node):
                 )
                 for arm in ("left", "right")
             }
-            for source in ("policy", "teleop")
+            for source in ("policy", "teleop", "waypoint")
         }
         final_topics = {
             "left": "/leader/joint_trajectory_command_broadcaster_left/joint_trajectory",
@@ -61,6 +61,7 @@ class HandoffProbe(Node):
                 "prepare_intervention",
                 "select_none",
                 "select_teleop",
+                "select_waypoint",
                 "select_policy",
                 "disable_intervention",
             )
@@ -127,9 +128,9 @@ def main() -> int:
         }, "TELEOP messages leaked while the arbiter was in NONE"
 
         for _ in range(3):
-            probe.publish_pair("policy", 0.0)
+            probe.publish_pair("waypoint", 0.0)
             time.sleep(0.03)
-        probe.call("select_policy")
+        probe.call("select_waypoint")
         wait_until(
             lambda: all(
                 len(probe.received[arm]) > blocked_counts[arm]
@@ -137,8 +138,25 @@ def main() -> int:
             )
         )
         probe.call("select_none")
+        waypoint_counts = {arm: len(items) for arm, items in probe.received.items()}
+
+        for _ in range(3):
+            probe.publish_pair("policy", 0.0)
+            time.sleep(0.03)
+        probe.call("select_policy")
+        wait_until(
+            lambda: all(
+                len(probe.received[arm]) > blocked_counts[arm]
+                and len(probe.received[arm]) > waypoint_counts[arm]
+                for arm in ("left", "right")
+            )
+        )
+        probe.call("select_none")
         probe.call("disable_intervention")
-        print("mock Intervention hand-off passed: NONE -> TELEOP -> NONE -> POLICY -> NONE")
+        print(
+            "mock hand-off passed: NONE -> TELEOP -> NONE -> "
+            "WAYPOINT -> NONE -> POLICY -> NONE"
+        )
         return 0
     finally:
         executor.shutdown()

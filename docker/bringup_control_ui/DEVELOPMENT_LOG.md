@@ -350,3 +350,11 @@ Cyclo supervisor는 AI Worker API를 same-origin `/api/intervention/*`로 프록
 Inference 설정에 Intervention Dataset Task Num/Name을 추가했다. 두 값은 `TaskInfo.tags`로 여러 브라우저에 동기화되고 녹화 시작에만 저장 identity로 사용된다. 두 값이 모두 있으면 같은 폴더에 episode를 이어 쓰며, 모두 비어 있으면 기존 timestamp 동작을 유지한다. 부분 입력, 경로 구분자, 제어 문자와 100자 초과 값은 녹화 전에 차단한다.
 
 검증 결과 cyclo_data recorder test 23개, 관련 Cyclo UI test 49개가 통과했고 production build를 완료했다. 실행 중 Cyclo는 s6 관리 서비스로 재시작했으며 새 UI bundle과 cyclo_data symlink-install source가 로드됐다.
+
+## 21. Mini warm-standby와 연속 Intervention episode
+
+2026-09-14 Mini 선택 시 하드웨어를 미리 연결하되 command ownership은 변경하지 않는 warm-standby를 추가했다. 일회용 standby lease로 시작된 Mini 양팔은 `/intervention/teleop/arm_*`에만 연결되고 Arbiter는 `NONE` 또는 기존 `POLICY`를 유지한다. Mini의 head/lift, `/cmd_vel`, tact trigger도 별도 `/intervention/teleop/*` 토픽으로 격리했다. Intervention 진입 시에는 explicit prepare 이후에만 `TELEOP`을 선택하며, 종료 시 Mini를 끄지 않고 다시 arm release 상태의 standby로 되돌린다.
+
+기존 inference recording이 진행 중이면 실패 구간을 먼저 저장하고 별도 correction episode를 여는 동작을 제거했다. recorder는 policy pause와 hand-off 중에도 계속 실행되고, 최종 `Save`/`Discard`가 inference 구간과 사람 교정 구간을 포함한 같은 episode에 한 번 적용된다. F2 arm recording은 `/command_source_arbiter/executed/arm_*`를 사용하며 `/leader/intervention_mode`로 개입 구간을 표시한다.
+
+실기 standby 시험에서 연결 요청부터 READY까지 7.707초였고, 연결 중 최종 F2 arm command는 좌/우 모두 0건이었다. 16개 arm/gripper joint의 최대 feedback 변화는 0.001534 rad였으며 Arbiter `NONE`, final arm publisher 각 1개, `/cmd_vel` publisher 0개를 확인했다.

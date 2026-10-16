@@ -80,17 +80,17 @@ _FALLBACK_URDF = {
     "arm_r_joint1": (-3.14, 3.14),
     "arm_r_joint2": (-3.14, 0.0),
     "arm_r_joint3": (-3.14, 3.14),
-    "arm_r_joint4": (-2.9361, 1.0786),
+    "arm_r_joint4": (-2.9361, 1.0785802414820915),
     "arm_r_joint5": (-3.14, 3.14),
     "arm_r_joint6": (-1.57, 1.57),
-    "arm_r_joint7": (-1.5804, 1.8201),
+    "arm_r_joint7": (-1.3639424895214947, math.pi / 2.0),
     "arm_l_joint1": (-3.14, 3.14),
     "arm_l_joint2": (0.0, 3.14),
     "arm_l_joint3": (-3.14, 3.14),
-    "arm_l_joint4": (-2.9361, 1.0786),
+    "arm_l_joint4": (-2.9361, 1.0785802414820915),
     "arm_l_joint5": (-3.14, 3.14),
     "arm_l_joint6": (-1.57, 1.57),
-    "arm_l_joint7": (-1.8201, 1.5804),
+    "arm_l_joint7": (-math.pi / 2.0, 1.3639424895214947),
 }
 
 _FALLBACK_TICKS = {

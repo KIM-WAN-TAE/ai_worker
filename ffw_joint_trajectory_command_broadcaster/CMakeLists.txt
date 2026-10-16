@@ -14,7 +14,10 @@ set(THIS_PACKAGE_INCLUDE_DEPENDS
   builtin_interfaces
   control_msgs
   controller_interface
+  eigen3_cmake_module
   generate_parameter_library
+  kdl_parser
+  orocos_kdl_vendor
   pluginlib
   rclcpp
   rclcpp_lifecycle
@@ -34,6 +37,7 @@ find_package(backward_ros REQUIRED)
 foreach(Dependency IN ITEMS ${THIS_PACKAGE_INCLUDE_DEPENDS})
   find_package(${Dependency} REQUIRED)
 endforeach()
+find_package(Eigen3 REQUIRED)
 
 generate_parameter_library(joint_trajectory_command_broadcaster_parameters
   src/joint_trajectory_command_broadcaster_parameters.yaml
@@ -54,7 +58,10 @@ target_link_libraries(joint_trajectory_command_broadcaster PUBLIC
   ${std_msgs_TARGETS}
   ${trajectory_msgs_TARGETS}
   controller_interface::controller_interface
+  Eigen3::Eigen
   joint_trajectory_command_broadcaster_parameters
+  kdl_parser::kdl_parser
+  orocos-kdl
   pluginlib::pluginlib
   rclcpp_lifecycle::rclcpp_lifecycle
 )
@@ -86,6 +93,21 @@ if(BUILD_TESTING)
   target_include_directories(test_gripper_edge_gate PRIVATE
     ${PROJECT_SOURCE_DIR}/include
   )
+
+  ament_add_gmock(test_leader_action_latch
+    test/test_leader_action_latch.cpp
+  )
+  target_include_directories(test_leader_action_latch PRIVATE
+    ${PROJECT_SOURCE_DIR}/include
+  )
+
+  ament_add_gmock(test_relative_pose_mapper
+    test/test_relative_joint_mapper.cpp
+  )
+  target_include_directories(test_relative_pose_mapper PRIVATE
+    ${PROJECT_SOURCE_DIR}/include
+  )
+  target_link_libraries(test_relative_pose_mapper Eigen3::Eigen)
 endif()
 
 ################################################################################

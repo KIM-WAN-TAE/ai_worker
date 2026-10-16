@@ -41,7 +41,7 @@ position 분해능은 `607500 tick/rev`이지만, 기존 J7 limit 값은 Y 계�
 | 확인된 모델 | `PH42-020-S300-R` | `PH42-020-S300-R` |
 | 모델 번호 | `2000` | `2000` |
 | 실제 분해능 | `607500 tick/rev` | `607500 tick/rev` |
-| 현재 active limit | `[-131875, 151875] tick` | `[-151875, 131875] tick` |
+| 조사 시점 live limit | `[-131875, 151875] tick` | `[-151875, 131875] tick` |
 
 설정 파일은 다음과 같다.
 
@@ -195,58 +195,49 @@ Task 700013 파생 데이터 100 episode, 129654 frame을 읽기 전용으로 �
 특정 task 실패가 전부 J7 설정 오류 때문에 발생했다고 단정할 수는 없다. 카메라 구도,
 데이터 동기화, 정책 출력 및 다른 controller 조건은 별도로 평가해야 한다.
 
-## 수학적으로 계산한 수정 후보
+## 수정값 계산
 
-PH42의 실제 `607500 tick/rev`를 사용해 좌우 URDF 범위를 최소 1 tick 바깥에서
-포함시키면 다음 후보를 얻는다.
+PH42의 실제 `607500 tick/rev`를 사용해 좌우 URDF 범위를 바깥쪽 정수 tick으로
+반올림하여 포함시키면 다음 후보를 얻는다.
 
 | 관절 | 후보 Min | 후보 Max | 환산 범위 |
 | --- | ---: | ---: | --- |
 | 오른팔 J7, ID 7 | `-152804` | `175980` | `[-1.580405, 1.820107] rad` |
 | 왼팔 J7, ID 37 | `-175980` | `152804` | `[-1.820107, 1.580405] rad` |
 
-이 값은 **수학적으로 URDF를 포함하는 후보**이지, production 적용이 승인된 값이 아니다.
-기구 stopper, 손목 카메라, 케이블, gripper 및 주변 구조물과의 간섭을 확인하지 않고
-EEPROM limit을 넓히면 기존 hard limit이 막고 있던 영역으로 실제 관절이 진입할 수 있다.
+이 값은 소스 설정에 반영했지만 아직 실기 EEPROM에 적용하거나 powered test를 수행하지
+않았다. 기구 stopper, 손목 카메라, 케이블, gripper 및 주변 구조물과의 간섭을 확인하지
+않고 EEPROM limit을 적용하면 기존 hard limit이 막고 있던 영역으로 실제 관절이 진입할
+수 있다.
 
-## 현재 소스 상태
+## 수정된 소스 상태
 
-현재 active 값은 좌우 복사 오류만 바로잡고, Y 계열 분해능으로 계산된 기존 폭은
-유지한다.
-
-```xml
-<!-- 오른팔 ID 7: 현재 활성값 -->
-<param name="Max Position Limit">151875</param>
-<param name="Min Position Limit">-131875</param>
-
-<!-- 왼팔 ID 37: 현재 활성값 -->
-<param name="Max Position Limit">131875</param>
-<param name="Min Position Limit">-151875</param>
-```
-
-기본·smooth F2 Xacro에는 PH42 계산 결과를 다음처럼 주석 후보로만 남긴다.
+PH42의 실제 분해능으로 계산한 범위를 기본·smooth F2 Xacro에 활성화했다. 이 범위는
+명목 URDF endpoint를 바깥쪽 정수 tick으로 반올림하여 포함한다.
 
 ```xml
-<!-- 오른팔 ID 7: 미승인 후보 -->
-<!--
+<!-- 오른팔 ID 7 -->
 <param name="Max Position Limit">175980</param>
 <param name="Min Position Limit">-152804</param>
--->
 
-<!-- 왼팔 ID 37: 미승인 후보 -->
-<!--
+<!-- 왼팔 ID 37 -->
 <param name="Max Position Limit">152804</param>
 <param name="Min Position Limit">-175980</param>
--->
 ```
 
-이 주석은 수정 적용이 아니라, 검토할 숫자와 계산 근거를 소스 가까이에 보존하기 위한
-것이다. 현재 실행 중인 DYNAMIXEL EEPROM을 변경하거나 새 후보로 powered test를 수행한
-상태가 아니다.
+소프트웨어 위치 검사는 다음 명목 기구 범위를 사용한다.
 
-## Manager 확인이 필요한 사항
+```text
+오른팔 J7: [-1.5804, 1.8201] rad
+왼팔 J7:   [-1.8201, 1.5804] rad
+```
 
-다음 항목을 확인하기 전에는 후보값을 활성화하지 않는다.
+소스 변경만 완료했으며, 현재 실행 중인 DYNAMIXEL EEPROM을 변경하거나 새 범위로
+powered test를 수행한 상태는 아니다. 변경값은 다음 하드웨어 재시작 시 적용될 수 있다.
+
+## 실기 적용 전 확인 사항
+
+다음 항목을 확인한 뒤 제한값을 실기에 적용하고 endpoint 접근 시험을 진행한다.
 
 - 설치된 ID 7·37의 모델과 EEPROM Min/Max/Homing Offset read-back
 - torque-off 상태의 실제 기구 가동 범위
@@ -259,6 +250,6 @@ EEPROM limit을 넓히면 기존 hard limit이 막고 있던 영역으로 실제
 
 > F2 J7은 실제로 PH42 모터라서 한 바퀴가 607500 tick인데, 기존 limit은 다른 팔
 > 관절에 사용하는 Y 계열의 524288 tick 기준으로 계산돼 있었습니다. 여기에 왼팔용
-> endpoint가 오른팔에도 복사되어 오른팔의 양의 방향 오차가 특히 컸습니다. 현재 검토
-> 소스에서는 좌우 복사만 바로잡았고, PH42 기준 후보값은 기구와 케이블 안전 확인을 받지
-> 않았기 때문에 활성화하지 않은 채 주석과 문서에 남겼습니다.
+> endpoint가 오른팔에도 복사되어 오른팔의 양의 방향 오차가 특히 컸습니다. 소스의
+> EEPROM·URDF·arbiter 제한은 PH42 기준과 명목 기구 범위에 맞췄으며, 실제 하드웨어에는
+> 재시작과 안전 확인 후 적용합니다.

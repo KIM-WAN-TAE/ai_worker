@@ -1,0 +1,454 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Waypoint Telep</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">WP</span>
+      <div>
+        <strong>Waypoint Telep</strong>
+        <small>관절·전역 고정 frame 상대 이동·그리퍼 상대 목표와 다중 경로 미리보기</small>
+      </div>
+    </div>
+    <div class="header-badges">
+      <a class="generator-link" href="/generator">드릴 경로 생성기</a>
+      <span id="armBadge" class="badge neutral">DUAL ARM</span>
+      <span id="safetyBadge" class="badge safe">PREVIEW ONLY</span>
+      <span id="connectionBadge" class="badge offline">연결 중</span>
+    </div>
+  </header>
+
+  <main class="page">
+    <section class="notice">
+      <div>
+        <strong>기본 모드는 로봇 명령을 보내지 않습니다.</strong>
+        <p>왼팔과 오른팔의 waypoint를 독립적으로 편집하고 양팔 경로를 함께 확인하세요.</p>
+      </div>
+      <span id="jointFreshness" class="status-chip waiting">Joint state 대기 중</span>
+    </section>
+
+    <section class="arm-selector" aria-label="편집할 팔 선택">
+      <button class="arm-tab active" data-arm="left">
+        <span>왼팔</span><strong><b id="leftWaypointCount">0</b> waypoint</strong>
+      </button>
+      <button class="arm-tab" data-arm="right">
+        <span>오른팔</span><strong><b id="rightWaypointCount">0</b> waypoint</strong>
+      </button>
+      <p>선택한 팔의 입력값과 목록만 편집됩니다. 시뮬레이션에는 양팔 경로가 함께 표시됩니다.</p>
+    </section>
+
+    <section class="workspace">
+      <article class="panel editor-panel">
+        <div class="panel-heading">
+          <div>
+            <span class="eyebrow">01 · TARGET</span>
+            <h1 id="jointEditorTitle">왼팔 관절 목표값</h1>
+            <p>단위는 degree입니다. 현재값을 복사한 뒤 필요한 관절만 조정할 수 있습니다.</p>
+          </div>
+          <div class="heading-actions">
+            <button id="copyCurrent" class="button secondary">현재값 복사</button>
+            <button id="resetTarget" class="button ghost">0으로 초기화</button>
+          </div>
+        </div>
+
+        <div class="joint-table-wrap">
+          <table>
+            <thead>
+              <tr><th>Joint</th><th>현재값</th><th>목표값 (deg)</th><th>차이</th></tr>
+            </thead>
+            <tbody id="jointRows"></tbody>
+          </table>
+        </div>
+
+        <div class="radian-list-editor">
+          <label for="radianJointList">관절값 리스트 (rad)</label>
+          <textarea id="radianJointList" rows="2" spellcheck="false"
+            placeholder="[-0.4156368882, 0.7746003768, -0.5792455266, -1.3446540028, 0.5723905499, -0.0562899044, -1.0671589465, 0.0]"></textarea>
+          <div>
+            <small>선택한 팔의 Joint 1부터 Joint 7, Gripper 순서로 숫자 8개를 입력합니다.</small>
+            <button id="addRadianList" class="button secondary">radian 리스트로 waypoint 추가</button>
+          </div>
+        </div>
+
+        <label class="next-dwell">
+          <span>추가할 waypoint 도착 후 대기</span>
+          <span><input id="nextDwell" type="number" min="0" max="30" step="0.1" value="0"> 초</span>
+        </label>
+        <label class="next-speed">
+          <span>추가할 waypoint까지 속도 배율 (기본 1)</span>
+          <span><input id="nextSpeed" type="number" min="0.01" max="3" step="0.1" value="1"> 배</span>
+        </label>
+        <div class="waypoint-actions">
+          <button id="addTarget" class="button primary wide">목표값을 waypoint로 추가</button>
+          <button id="captureCurrent" class="button secondary">현재 자세 추가</button>
+          <button id="removeLast" class="button ghost">마지막 삭제</button>
+          <button id="clearAll" class="button ghost">전체 삭제</button>
+        </div>
+        <div class="waypoint-count"><span>저장된 waypoint</span><strong id="waypointCount">0</strong></div>
+      </article>
+
+      <aside class="side-column">
+        <article class="panel relative-panel absolute-panel">
+          <div class="panel-heading simple">
+            <div>
+              <span class="eyebrow">01B · FIXED-FRAME RELATIVE TARGET</span>
+              <h2 id="frameRelativeTitle">왼팔 전역 고정 frame 기준 상대 이동</h2>
+              <p><b id="absoluteFrameName">odom</b>의 고정 XYZ/RPY 축을 기준으로 델타를 적용합니다.</p>
+            </div>
+          </div>
+          <div class="gripper-pose">
+            <span>선택 기준의 절대 자세 · <b id="frameRelativePoseFrame">world</b></span>
+            <strong id="frameRelativePose">절대 pose 대기 중</strong>
+          </div>
+          <label class="relative-reference" for="frameRelativeReferenceSelect">
+            <span>계산 기준</span>
+            <select id="frameRelativeReferenceSelect" aria-label="절대 frame 상대 이동 계산 기준">
+              <option value="last">마지막 waypoint</option>
+              <option value="current">현재 실제 자세</option>
+            </select>
+          </label>
+          <div class="relative-grid">
+            <label><span>ΔX <b>mm</b></span><input id="frameRelativeX" class="pose-input" type="number" step="1" value="0"></label>
+            <label><span>ΔY <b>mm</b></span><input id="frameRelativeY" class="pose-input" type="number" step="1" value="0"></label>
+            <label><span>ΔZ <b>mm</b></span><input id="frameRelativeZ" class="pose-input" type="number" step="1" value="0"></label>
+            <label><span>ΔRoll <b>deg</b></span><input id="frameRelativeRoll" class="pose-input" type="number" step="1" value="0"></label>
+            <label><span>ΔPitch <b>deg</b></span><input id="frameRelativePitch" class="pose-input" type="number" step="1" value="0"></label>
+            <label><span>ΔYaw <b>deg</b></span><input id="frameRelativeYaw" class="pose-input" type="number" step="1" value="0"></label>
+          </div>
+          <button id="addFrameRelative" class="button primary full absolute-add">고정 frame 상대 목표 계산 후 waypoint 추가</button>
+          <p class="relative-note">위치는 표시된 전역 고정축으로 더하고, 회전은 ΔR × R기준 순서로 합성한 뒤 arm base frame으로 변환해 IK를 계산합니다.</p>
+        </article>
+
+        <article class="panel relative-panel">
+          <div class="panel-heading simple">
+            <div>
+              <span class="eyebrow">01C · GRIPPER RELATIVE TARGET</span>
+              <h2 id="relativeTitle">왼팔 그리퍼 기준 상대 이동</h2>
+              <p>RGB 축을 기준으로 이동량을 입력하면 절대 목표와 IK 관절값을 계산합니다.</p>
+            </div>
+          </div>
+          <div class="gripper-pose">
+            <span>현재 그리퍼 자세 · <b id="gripperFrameName">—</b></span>
+            <strong id="gripperPose">URDF와 joint state 대기 중</strong>
+          </div>
+          <label class="relative-reference" for="relativeReferenceSelect">
+            <span>계산 기준</span>
+            <select id="relativeReferenceSelect" aria-label="상대 이동 계산 기준">
+              <option value="last">마지막 waypoint</option>
+              <option value="current">현재 실제 자세</option>
+            </select>
+          </label>
+          <div class="relative-grid">
+            <label><span>ΔX <b>mm</b></span><input id="relativeX" class="pose-input" type="number" step="1" value="0"></label>
+            <label><span>ΔY <b>mm</b></span><input id="relativeY" class="pose-input" type="number" step="1" value="0"></label>
+            <label><span>ΔZ <b>mm</b></span><input id="relativeZ" class="pose-input" type="number" step="1" value="0"></label>
+            <label><span>ΔRoll <b>deg</b></span><input id="relativeRoll" class="pose-input" type="number" step="1" value="0"></label>
+            <label><span>ΔPitch <b>deg</b></span><input id="relativePitch" class="pose-input" type="number" step="1" value="0"></label>
+            <label><span>ΔYaw <b>deg</b></span><input id="relativeYaw" class="pose-input" type="number" step="1" value="0"></label>
+          </div>
+          <button id="addRelative" class="button primary full relative-add">상대 목표 계산 후 waypoint 추가</button>
+          <p class="relative-note">기본값은 마지막 waypoint입니다. 목록의 다른 waypoint나 현재 실제 자세를 기준으로 선택할 수 있습니다.</p>
+        </article>
+
+        <article class="panel mode-panel">
+          <div class="panel-heading simple">
+            <div>
+              <span class="eyebrow">02 · INTERPOLATION</span>
+              <h2>새 waypoint 기본 보간</h2>
+              <p>이후 추가하는 waypoint의 기본값만 정합니다. 기존 구간은 아래 목록의 각 카드에서 따로 선택합니다.</p>
+            </div>
+          </div>
+          <div class="mode-options">
+            <button class="mode-card active" data-mode="linear">
+              <span class="mode-icon linear-icon"></span>
+              <span><strong>Cartesian 직선</strong><small>LINEAR · 말단 경로를 직선으로 유지하며 IK 계산</small></span>
+              <i></i>
+            </button>
+            <button class="mode-card" data-mode="joint">
+              <span class="mode-icon joint-icon"></span>
+              <span><strong>관절 보간</strong><small>JOINT · 입력한 관절 목표까지 quintic 보간</small></span>
+              <i></i>
+            </button>
+          </div>
+        </article>
+
+        <article class="panel command-panel">
+          <div class="panel-heading simple">
+            <div>
+              <span class="eyebrow">03 · CHECK & RUN</span>
+              <h2>경로 확인</h2>
+            </div>
+          </div>
+          <div class="waypoint-range-control">
+            <label for="startWaypointSelect"><span>시작</span><select id="startWaypointSelect" aria-label="실행 시작 waypoint" disabled><option value="1">Waypoint 1</option></select></label>
+            <label for="endWaypointSelect"><span>종료</span><select id="endWaypointSelect" aria-label="실행 종료 waypoint" disabled><option value="1">Waypoint 1</option></select></label>
+            <small>실행 시작 지점과 종료 지점을 고르면 현재 자세에서 해당 구간을 다시 계획합니다.</small>
+          </div>
+          <label class="joint-smoothing-control" for="jointSmoothing">
+            <input id="jointSmoothing" type="checkbox">
+            <span><strong>JOINT 연속 통과</strong><small>선택 구간이 모두 JOINT일 때만 적용됩니다. Cartesian/LINEAR 지점이 포함되면 일반 방식으로 실행합니다.</small></span>
+          </label>
+          <p id="jointTimingInfo" hidden style="margin:0 18px 12px;font-size:12px;color:#245a98"></p>
+          <details class="path-refinement" open>
+            <summary>Cartesian 경로를 JOINT로 재현 · 보간과 스무딩</summary>
+            <label><input id="refinementEnabled" type="checkbox"> 오차를 검증하며 JOINT 경로 생성</label>
+            <p>Cartesian 구간은 직선과 자세를 유지하도록 중간 관절점을 만듭니다. JOINT 구간도 지정한 수로 나눕니다. 원본 waypoint는 유지됩니다.</p>
+            <label for="refinementSubdivisions">구간당 중간점 수
+              <input id="refinementSubdivisions" type="number" min="0" max="255" step="1" value="9">
+            </label>
+            <small>9를 입력하면 두 원본 지점 사이에 중간점 9개를 균등하게 만듭니다. JOINT 구간은 이 개수를 유지합니다. Cartesian 구간은 경로 오차를 줄이기 위해 필요한 경우에만 더 세분화합니다.</small>
+            <label for="refinementStrength">스무딩 강도 <output id="refinementStrengthValue">100%</output>
+              <input id="refinementStrength" type="range" min="0" max="100" step="1" value="100">
+            </label>
+            <label>스무딩 강도 직접 입력 (%)
+              <input id="refinementStrengthNumber" type="number" min="0" max="100" step="1" value="100">
+            </label>
+            <div class="refinement-presets">
+              <button type="button" data-smoothing="0">없음 0%</button>
+              <button type="button" data-smoothing="30">약하게 30%</button>
+              <button type="button" data-smoothing="60">보통 60%</button>
+              <button type="button" data-smoothing="100">강하게 100%</button>
+            </div>
+            <p id="refinementStrengthHelp"></p>
+            <small>강도는 원본 구간 사이의 통과 속도를 얼마나 이어 줄지 정합니다. 0%는 원본 지점에서 정지하고 100%는 최대한 이어 줍니다. 원본 지점을 정확히 통과하며 대기 지점에서는 항상 정지합니다.</small>
+            <div class="refinement-grid">
+              <label>위치 허용 오차 (mm)<input id="refinementPosition" type="number" min="0.000001" max="100" step="any" value="1"></label>
+              <label>자세 허용 오차 (°)<input id="refinementOrientation" type="number" min="0.000001" max="180" step="any" value="1"></label>
+              <label>JOINT 허용 오차 (rad)<input id="refinementJoint" type="number" min="0.000000001" max="1" step="any" value="0.01"></label>
+              <label>최대 추가 재시도 (회)<input id="refinementRetries" type="number" min="0" max="8" step="1" value="5"></label>
+            </div>
+            <small>허용 오차를 넘으면 연결 강도를 낮춰 재시도하며 실제 적용 강도를 아래에 표시합니다. 이 보간을 적용한 뒤 목표시간 자동 배정을 사용할 수 있습니다. 기존 끝단 등속 설정은 먼저 해제해 주세요. 관절 제한 근처에서는 여유가 있는 다른 IK 해를 먼저 찾으며 기계적 경계에는 작은 여유를 남깁니다.</small>
+            <button id="applyRefinement" class="button secondary full">설정 적용 후 경로 계산</button>
+            <div id="refinementMonitor" role="status" aria-live="polite"></div>
+            <button id="downloadRefinementReport" type="button" class="button secondary full">보간 진단 JSON 저장</button>
+            <small>명령 샘플의 4배 밀도로 FK 오차를 검사합니다. 현재 자세에서 첫 지점까지의 정렬 이동은 오차 비교에서 제외합니다. 실제 로봇의 추종 오차와 충돌은 이 검사에 포함되지 않습니다.</small>
+          </details>
+          <button id="preview" class="button primary full">선택한 팔 계산 및 재생</button>
+          <button id="previewBoth" class="button secondary full dual-preview">양팔 경로 계산 및 동시 재생</button>
+          <div class="source-control">
+            <div><span>현재 팔 제어권</span><strong id="arbiterMode">확인 중</strong></div>
+            <div class="source-actions">
+              <button id="startKeyboard" class="button primary">키보드 WAYPOINT</button>
+              <button id="prepareTeleop" class="button secondary">텔레옵 미리 연결</button>
+              <button id="startTeleop" class="button secondary">상대 리더 TELEOP</button>
+            </div>
+          </div>
+          <p id="arbiterFault" class="source-fault" hidden></p>
+          <section id="keyboardControl" class="keyboard-control" aria-label="world 좌표 키보드 이동">
+            <div class="keyboard-heading">
+              <div>
+                <strong>6방향 LINEAR 키보드 제어</strong>
+                <small>선택한 팔 · <b id="keyboardFrame">world</b> 좌표 · 키를 누르는 동안만 이동</small>
+              </div>
+            </div>
+            <div class="keyboard-speed-grid" aria-label="방향별 이동 속도">
+              <label><span>앞 W</span><input class="keyboard-speed" data-direction="front" type="number" min="1" max="50" step="1" value="5"><small>mm/s</small></label>
+              <label><span>뒤 S</span><input class="keyboard-speed" data-direction="back" type="number" min="1" max="50" step="1" value="5"><small>mm/s</small></label>
+              <label><span>왼쪽 A</span><input class="keyboard-speed" data-direction="left" type="number" min="1" max="50" step="1" value="5"><small>mm/s</small></label>
+              <label><span>오른쪽 D</span><input class="keyboard-speed" data-direction="right" type="number" min="1" max="50" step="1" value="5"><small>mm/s</small></label>
+              <label><span>위 R</span><input class="keyboard-speed" data-direction="up" type="number" min="1" max="50" step="1" value="5"><small>mm/s</small></label>
+              <label><span>아래 F</span><input class="keyboard-speed" data-direction="down" type="number" min="1" max="50" step="1" value="5"><small>mm/s</small></label>
+            </div>
+            <div class="jog-layout">
+              <div class="jog-plane" aria-label="앞뒤 좌우 이동">
+                <button class="jog-key" data-direction="front"><kbd>W</kbd><span>앞 +X</span></button>
+                <button class="jog-key" data-direction="left"><kbd>A</kbd><span>왼쪽 +Y</span></button>
+                <button class="jog-key" data-direction="back"><kbd>S</kbd><span>뒤 -X</span></button>
+                <button class="jog-key" data-direction="right"><kbd>D</kbd><span>오른쪽 -Y</span></button>
+              </div>
+              <div class="jog-height" aria-label="위아래 이동">
+                <button class="jog-key" data-direction="up"><kbd>R</kbd><span>위 +Z</span></button>
+                <button class="jog-key" data-direction="down"><kbd>F</kbd><span>아래 -Z</span></button>
+              </div>
+            </div>
+            <p id="keyboardHint">키보드 WAYPOINT 제어권을 먼저 선택하세요. 입력란에 커서가 있을 때는 단축키가 동작하지 않습니다.</p>
+          </section>
+          <div class="execution-gate" id="executionGate">
+            <label><input id="executeConsent" type="checkbox"> WAYPOINT 제어권으로 양팔 command가 기록·전송됨을 확인했습니다.</label>
+          </div>
+          <div class="command-grid">
+            <button id="execute" class="button execute" disabled>현재 팔만 실행</button>
+            <button id="executeSlowStart" class="button secondary" disabled>시작점 저속 정렬 후 실행</button>
+            <button id="stop" class="button danger">정지 요청</button>
+          </div>
+          <p class="record-note">Cyclo Record가 실행 중이면 텔레옵과 waypoint의 최종 좌·우 arm command가 같은 episode에 연속 저장됩니다.</p>
+        </article>
+      </aside>
+    </section>
+
+    <section class="panel waypoint-list-panel">
+      <div class="panel-heading waypoint-list-heading">
+        <div>
+          <span class="eyebrow">ORDERED WAYPOINTS</span>
+          <div class="waypoint-list-title-row">
+            <button id="toggleWaypointList" class="button ghost waypoint-list-toggle" type="button" aria-expanded="true" aria-controls="waypointList" aria-label="Waypoint 목록 접기" title="Waypoint 목록 접기">▾</button>
+            <h2 id="waypointListTitle">왼팔 다중 waypoint 목록</h2>
+          </div>
+          <p>목록 순서대로 이동합니다. 각 지점까지의 보간 방식·동작 속도와 도착 후 대기 시간을 개별 지정할 수 있습니다. 좌표는 <span id="waypointFrameName">기준 링크</span> 기준 절대 위치입니다.</p>
+        </div>
+        <div class="heading-actions">
+          <button id="saveWaypointFile" class="button secondary">이 팔 파일 저장</button>
+          <button id="loadWaypointFile" class="button secondary">이 팔 파일 불러오기</button>
+          <input id="waypointFileInput" type="file" accept="application/json,.json" hidden>
+          <button id="removeLastList" class="button ghost">마지막 삭제</button>
+          <button id="clearAllList" class="button ghost">전체 삭제</button>
+        </div>
+      </div>
+      <div id="equalTimePanel" class="equal-time-panel" hidden>
+        <strong>목표시간 자동 배정</strong>
+        <div class="equal-time-controls">
+          <label>시간 기준
+            <select id="equalTimeMode">
+              <option value="total">전체 목표시간</option>
+              <option value="segment">구간당 동일 시간</option>
+            </select>
+          </label>
+          <label><span id="equalTimeSecondsLabel">전체 목표시간 (초)</span>
+            <input id="equalTimeSeconds" type="number" min="0" step="0.01" placeholder="비우면 자동 계산">
+          </label>
+          <label>제외할 도착 waypoint 번호
+            <input id="equalTimeExcluded" type="text" placeholder="예: 225-231, 240">
+          </label>
+          <button id="equalTimeAll" class="button secondary">전체 목표시간 적용</button>
+          <button id="equalTimeExcept" class="button secondary">선택 구간 제외하고 적용</button>
+        </div>
+        <p>전체 목표시간은 첫 waypoint 도착부터 마지막 waypoint의 대기 종료까지입니다. 대기 시간과 제외 구간의 기존 시간을 보존하고, 남은 시간을 나머지 구간에 동일하게 배정합니다. 현재 자세에서 첫 waypoint로 정렬하는 시간은 별도입니다. 선택한 팔의 목록 전체를 정순으로 계산합니다.</p>
+        <p>225번 제외는 224→225 이동을 보존한다는 뜻입니다. 적용 시 기존 끝단 등속 설정을 대체하며 거리가 다르면 속도도 달라집니다. 전체 목표시간은 반드시 입력해야 하며, 허용 범위나 샘플 변화량 한도를 통과하지 못하면 기존 설정을 유지합니다. 구간당 시간 모드에서만 빈칸을 자동 계산합니다. 검증은 로봇을 움직이지 않으며 관절 상태 입력이 없으면 첫 waypoint를 시작 자세로 사용합니다.</p>
+        <p id="equalTimeResult" role="status" aria-live="polite">시간 배정 후 검증 결과가 여기에 표시됩니다.</p>
+      </div>
+      <div id="waypointList" class="waypoint-list">
+        <div class="waypoint-list-empty">관절 목표, world 절대 자세, 그리퍼 상대 목표를 여러 개 추가할 수 있습니다.</div>
+      </div>
+    </section>
+
+    <section class="panel sequence-panel">
+      <div class="panel-heading sequence-heading">
+        <div>
+          <span class="eyebrow">DUAL ARM SEQUENCE</span>
+          <h2>양팔 순차 실행</h2>
+          <p>팔과 waypoint 구간을 단계별로 추가합니다. 목록 전체를 실행하면 각 단계를 위에서 아래 순서로 실행합니다. 시작이 종료보다 크면 역순으로 실행합니다.</p>
+        </div>
+        <div class="heading-actions">
+          <button id="clearSequence" class="button ghost">목록 비우기</button>
+          <button id="executeSequence" class="button execute" disabled>순차 실행</button>
+        </div>
+      </div>
+      <div class="sequence-builder">
+        <label><span>팔</span><select id="sequenceArm"><option value="left">왼팔</option><option value="right">오른팔</option></select></label>
+        <label><span>시작</span><select id="sequenceStart" disabled><option>Waypoint 없음</option></select></label>
+        <label><span>종료</span><select id="sequenceEnd" disabled><option>Waypoint 없음</option></select></label>
+        <button id="addSequenceStep" class="button primary" disabled>실행 단계 추가</button>
+      </div>
+      <div id="executionSequence" class="execution-sequence">
+        <div class="waypoint-list-empty">실행할 팔과 waypoint 구간을 추가해 주세요.</div>
+      </div>
+    </section>
+
+    <section class="panel simulation-panel">
+      <div class="panel-heading simulation-heading">
+        <div>
+          <span class="eyebrow">F2 URDF SIMULATION</span>
+          <h2>로봇 경로 시뮬레이션</h2>
+          <p id="modelMeta">Cyclo와 동일한 F2 전체 URDF·mesh를 불러오는 중입니다.</p>
+        </div>
+        <div class="simulation-actions">
+          <button id="resetView" class="button ghost">시점 초기화</button>
+          <span id="modelBadge" class="status-chip waiting">URDF 대기 중</span>
+        </div>
+      </div>
+      <div class="simulation-editor-layout">
+        <div class="simulation-stage">
+          <canvas id="robotSimulation" height="430"></canvas>
+          <div id="simulationEmpty" class="simulation-empty">
+            <strong>F2 전체 URDF를 기다리고 있습니다.</strong>
+            <span>/robot_description과 mesh가 준비되면 전체 로봇 자세가 표시됩니다.</span>
+          </div>
+          <div id="viewHelp" class="view-help">빈 공간 드래그: 시점 회전 · 휠: 확대/축소</div>
+          <div class="simulation-legend">
+            <span><i class="legend-link"></i>F2 URDF mesh</span>
+            <span><i class="legend-path"></i>왼팔 경로</span>
+            <span><i class="legend-path right"></i>오른팔 경로</span>
+            <span><i class="legend-axis-x"></i>X</span>
+            <span><i class="legend-axis-y"></i>Y</span>
+            <span><i class="legend-axis-z"></i>Z</span>
+            <span>원점 큰 축: WORLD FIXED · 그리퍼 큰 축: 현재 자세 · 작은 축: waypoint</span>
+          </div>
+        </div>
+        <aside class="pose-editor" aria-label="시뮬레이션 목표 자세 편집기">
+          <div class="pose-editor-heading">
+            <div>
+              <span>6-DOF TARGET</span>
+              <strong id="poseEditorTitle">왼팔 목표 자세</strong>
+            </div>
+            <b id="poseEditorFrame">world</b>
+          </div>
+          <div class="pose-gizmo-modes" role="group" aria-label="3D 조작기 모드">
+            <button class="pose-mode active" data-pose-mode="translate" type="button">XYZ 이동</button>
+            <button class="pose-mode" data-pose-mode="rotate" type="button">Roll/Pitch/Yaw 회전</button>
+          </div>
+          <p id="poseGizmoHint" class="pose-gizmo-hint">3D 화살표를 드래그해 XYZ를 조정하세요.</p>
+          <div class="pose-number-grid">
+            <label><span>X <b>mm</b></span><input id="poseEditorX" class="pose-editor-input" data-pose-component="0" type="number" step="1"></label>
+            <label><span>Y <b>mm</b></span><input id="poseEditorY" class="pose-editor-input" data-pose-component="1" type="number" step="1"></label>
+            <label><span>Z <b>mm</b></span><input id="poseEditorZ" class="pose-editor-input" data-pose-component="2" type="number" step="1"></label>
+            <label><span>Roll <b>deg</b></span><input id="poseEditorRoll" class="pose-editor-input" data-pose-component="3" type="number" step="0.1"></label>
+            <label><span>Pitch <b>deg</b></span><input id="poseEditorPitch" class="pose-editor-input" data-pose-component="4" type="number" step="0.1"></label>
+            <label><span>Yaw <b>deg</b></span><input id="poseEditorYaw" class="pose-editor-input" data-pose-component="5" type="number" step="0.1"></label>
+          </div>
+          <div class="pose-load-actions">
+            <button id="poseLoadCurrent" class="button ghost" type="button">현재 자세 불러오기</button>
+            <button id="poseLoadSelected" class="button ghost" type="button">선택 waypoint 불러오기</button>
+          </div>
+          <button id="poseAddWaypoint" class="button primary full" type="button">이 자세를 waypoint로 추가</button>
+          <small>화살표·회전 링 조작과 숫자 입력은 서로 동기화됩니다. 추가 버튼을 누르기 전에는 로봇 명령을 보내지 않습니다.</small>
+        </aside>
+      </div>
+      <div class="playback-bar">
+        <button id="simulationPlay" class="button secondary" disabled>재생</button>
+        <input id="simulationTimeline" type="range" min="0" max="1000" value="0" disabled aria-label="trajectory 재생 위치">
+        <strong id="simulationTime">현재 자세</strong>
+      </div>
+      <div class="waypoint-inspector" id="waypointInspector">
+        <div>
+          <span>선택한 waypoint 관절값</span>
+          <strong id="waypointInspectorTitle">Waypoint를 선택하세요</strong>
+          <small id="waypointInspectorMeta">목록의 waypoint를 클릭하면 해당 자세와 8축 radian 변화량을 표시합니다.</small>
+          <button id="copyWaypointRadians" class="button secondary copy-waypoint-radians" disabled>8축 radian 리스트 복사</button>
+        </div>
+        <div class="waypoint-joint-values" id="waypointJointValues"></div>
+      </div>
+      <p class="simulation-note">Cyclo Intelligence와 동일한 F2 URDF·STL mesh 및 joint 적용 방식을 사용합니다. Mesh를 표시하지만 self-collision 및 주변 물체 충돌은 검사하지 않습니다.</p>
+    </section>
+
+    <section class="panel preview-panel">
+      <div class="panel-heading chart-heading">
+        <div>
+          <span class="eyebrow">TRAJECTORY PREVIEW</span>
+          <h2 id="trajectoryTitle">왼팔 관절 경로</h2>
+          <p id="trajectoryMeta">경로를 계산하면 관절별 보간 결과가 표시됩니다.</p>
+        </div>
+        <div id="chartLegend" class="legend"></div>
+      </div>
+      <div class="chart-wrap">
+        <canvas id="trajectoryChart" height="290"></canvas>
+        <div id="chartEmpty" class="chart-empty">아직 계산된 경로가 없습니다.</div>
+      </div>
+    </section>
+
+    <section class="panel status-panel">
+      <span class="status-dot"></span>
+      <div><small>Waypoint node status</small><strong id="nodeStatus">연결 대기 중</strong></div>
+      <div id="executionFailureRow" hidden><small>최근 실행 오류</small><strong id="executionFailure"></strong></div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast" role="status"></div>
+  <script src="/full_robot_simulator.bundle.js?v=f2-single-port-20261013-1"></script>
+  <script src="/app.js?v=waypoint-refinement-20261016-2"></script>
+</body>
+</html>

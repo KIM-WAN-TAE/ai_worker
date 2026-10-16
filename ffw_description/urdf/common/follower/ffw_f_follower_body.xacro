@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro">
 
-   <xacro:macro name="ffw_f_follower_body" params="prefix parent *origin">
+   <xacro:macro name="ffw_f_follower_body" params="prefix parent arm_joint4_upper:=1.0786 arm_l_joint7_lower:=-1.8201 arm_l_joint7_upper:=1.5804 arm_r_joint7_lower:=-1.5804 arm_r_joint7_upper:=1.8201 *origin">
 
       <xacro:include filename="$(find ffw_description)/urdf/common/follower/wrist_d401.urdf.xacro" />
       <xacro:include filename="$(find realsense2_description)/urdf/_d455.urdf.xacro" />
@@ -211,7 +211,7 @@
          <child link="${prefix}arm_l_link4" />
          <origin xyz="0.0410041 0.0007 -0.1128" rpy="0 0 0" />
          <axis xyz="0 1 0" />
-         <limit velocity="4.8" effort="1000" lower="-2.9361" upper="1.0786" />
+         <limit velocity="4.8" effort="1000" lower="-2.9361" upper="${arm_joint4_upper}" />
          <dynamics damping="0.1" />
       </joint>
       <link name="${prefix}arm_l_link4">
@@ -307,7 +307,7 @@
          <child link="${prefix}arm_l_link7" />
          <origin xyz="-0.00025 -0.0007 -0.0775" rpy="0 0 0" />
          <axis xyz="1 0 0" />
-         <limit velocity="4.8" effort="1000" lower="-1.8201" upper="1.5804" />
+         <limit velocity="4.8" effort="1000" lower="${arm_l_joint7_lower}" upper="${arm_l_joint7_upper}" />
          <dynamics damping="0.1" />
       </joint>
       <link name="${prefix}arm_l_link7">
@@ -440,7 +440,7 @@
          <child link="${prefix}arm_r_link4" />
          <origin xyz="0.0410041 -0.0007 -0.1128" rpy="0 0 0" />
          <axis xyz="0 1 0" />
-         <limit velocity="4.8" effort="1000" lower="-2.9361" upper="1.0786" />
+         <limit velocity="4.8" effort="1000" lower="-2.9361" upper="${arm_joint4_upper}" />
          <dynamics damping="0.1" />
       </joint>
       <link name="${prefix}arm_r_link4">
@@ -536,7 +536,7 @@
          <child link="${prefix}arm_r_link7" />
          <origin xyz="-0.00025 -0.0007 -0.0775" rpy="0 0 0" />
          <axis xyz="1 0 0" />
-         <limit velocity="4.8" effort="1000" lower="-1.5804" upper="1.8201" />
+         <limit velocity="4.8" effort="1000" lower="${arm_r_joint7_lower}" upper="${arm_r_joint7_upper}" />
          <dynamics damping="0.1" />
       </joint>
       <link name="${prefix}arm_r_link7">
