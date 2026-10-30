@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Waypoint Telep</title>
   <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/curve_generator.css">
 </head>
 <body>
   <header class="topbar">
@@ -86,7 +87,9 @@
         <div class="waypoint-actions">
           <button id="addTarget" class="button primary wide">목표값을 waypoint로 추가</button>
           <button id="captureCurrent" class="button secondary">현재 자세 추가</button>
+          <button id="copyCurrentPose" class="button secondary" type="button" title="Joint 1~7, Gripper 순서의 8축 radian 리스트를 클립보드에 복사합니다." disabled>현재 자세 복사</button>
           <button id="removeLast" class="button ghost">마지막 삭제</button>
+          <button id="deleteRange" class="button ghost" type="button" aria-pressed="false">구간 삭제</button>
           <button id="clearAll" class="button ghost">전체 삭제</button>
         </div>
         <div class="waypoint-count"><span>저장된 waypoint</span><strong id="waypointCount">0</strong></div>
@@ -191,42 +194,76 @@
           </div>
           <label class="joint-smoothing-control" for="jointSmoothing">
             <input id="jointSmoothing" type="checkbox">
-            <span><strong>JOINT 연속 통과</strong><small>선택 구간이 모두 JOINT일 때만 적용됩니다. Cartesian/LINEAR 지점이 포함되면 일반 방식으로 실행합니다.</small></span>
+            <span><strong>JOINT 연속 통과</strong><small id="jointSmoothingHint">기본으로 켜져 있으며, 선택 구간이 모두 JOINT이면 자동 적용됩니다.</small></span>
           </label>
           <p id="jointTimingInfo" hidden style="margin:0 18px 12px;font-size:12px;color:#245a98"></p>
           <details class="path-refinement" open>
-            <summary>Cartesian 경로를 JOINT로 재현 · 보간과 스무딩</summary>
-            <label><input id="refinementEnabled" type="checkbox"> 오차를 검증하며 JOINT 경로 생성</label>
-            <p>Cartesian 구간은 직선과 자세를 유지하도록 중간 관절점을 만듭니다. JOINT 구간도 지정한 수로 나눕니다. 원본 waypoint는 유지됩니다.</p>
-            <label for="refinementSubdivisions">구간당 중간점 수
-              <input id="refinementSubdivisions" type="number" min="0" max="255" step="1" value="9">
+            <summary>경로 부드럽게 만들기</summary>
+            <label class="refinement-toggle" for="refinementEnabled">
+              <input id="refinementEnabled" type="checkbox">
+              <span><strong>부드럽게 연결</strong><small>저장한 지점을 유지하면서 구간 사이를 자연스럽게 이어 줍니다.</small></span>
             </label>
-            <small>9를 입력하면 두 원본 지점 사이에 중간점 9개를 균등하게 만듭니다. JOINT 구간은 이 개수를 유지합니다. Cartesian 구간은 경로 오차를 줄이기 위해 필요한 경우에만 더 세분화합니다.</small>
-            <label for="refinementStrength">스무딩 강도 <output id="refinementStrengthValue">100%</output>
-              <input id="refinementStrength" type="range" min="0" max="100" step="1" value="100">
+            <small id="refinementConnectionHint">저장한 지점을 지나며 최대한 이어갑니다. 대기시간이 있는 지점에서는 정지합니다.</small>
+            <small id="refinementSamplingHint">중간점은 이동 거리에 맞춰 자동으로 추가합니다.</small>
+            <label class="refinement-toggle" for="curveNoiseEnabled">
+              <input id="curveNoiseEnabled" type="checkbox">
+              <span><strong>곡선 · 시작점 노이즈 추가</strong><small>필요한 구간만 골라 경로와 첫 시작 자세를 바꿉니다.</small></span>
             </label>
-            <label>스무딩 강도 직접 입력 (%)
-              <input id="refinementStrengthNumber" type="number" min="0" max="100" step="1" value="100">
-            </label>
-            <div class="refinement-presets">
-              <button type="button" data-smoothing="0">없음 0%</button>
-              <button type="button" data-smoothing="30">약하게 30%</button>
-              <button type="button" data-smoothing="60">보통 60%</button>
-              <button type="button" data-smoothing="100">강하게 100%</button>
+            <div id="curveEditor" hidden>
+              <div id="curveSegments"></div>
+              <button id="addSegment" class="button secondary full" type="button">+ 구간 추가</button>
+              <small id="anchorHint">구간 밖의 저장 지점은 유지합니다.</small>
+              <small id="curveHint"></small>
+              <details class="curve-advanced"><summary>곡선 고급 설정</summary>
+                <label>만들 경로 수<input id="curveCount" type="number" min="1" max="30" value="1" step="1"></label>
+                <label>최대 곡선 편차 (mm)<input id="curveWidth" type="number" min="0.1" max="10" value="3" step="0.1"></label>
+                <label>랜덤 시드<input id="curveSeed" type="number" min="0" max="2147483647" value="42" step="1"></label>
+                <small>여러 경로를 만들면 첫 번째 경로를 적용하고 전체 결과를 저장할 수 있습니다. 시작점 노이즈 범위는 위의 첫 시작점 옵션에서 정합니다.</small>
+              </details>
+              <canvas id="curveCanvas" width="720" height="480" aria-label="선택 구간의 곡선 및 직선 미리보기"></canvas>
+              <div class="curve-views"><button id="viewXZ" type="button" aria-pressed="true">XZ</button><button id="viewYZ" type="button" aria-pressed="false">YZ</button><button id="viewXY" type="button" aria-pressed="false">XY</button></div>
+              <small id="previewHint"></small>
+              <p id="curveStatus" role="status" aria-live="polite"></p>
+              <div id="curveResult" hidden>
+                <small id="curveResultText"></small>
+                <button id="saveCurve" class="button secondary full" type="button">생성한 Waypoint JSON 저장</button>
+                <button id="saveCurveZip" class="button secondary full" type="button">전체 경로·검증 결과 저장</button>
+                <details><summary>곡선 검사 결과</summary><pre id="curveDiagnostics"></pre></details>
+              </div>
             </div>
-            <p id="refinementStrengthHelp"></p>
-            <small>강도는 원본 구간 사이의 통과 속도를 얼마나 이어 줄지 정합니다. 0%는 원본 지점에서 정지하고 100%는 최대한 이어 줍니다. 원본 지점을 정확히 통과하며 대기 지점에서는 항상 정지합니다.</small>
-            <div class="refinement-grid">
-              <label>위치 허용 오차 (mm)<input id="refinementPosition" type="number" min="0.000001" max="100" step="any" value="1"></label>
-              <label>자세 허용 오차 (°)<input id="refinementOrientation" type="number" min="0.000001" max="180" step="any" value="1"></label>
-              <label>JOINT 허용 오차 (rad)<input id="refinementJoint" type="number" min="0.000000001" max="1" step="any" value="0.01"></label>
-              <label>최대 추가 재시도 (회)<input id="refinementRetries" type="number" min="0" max="8" step="1" value="5"></label>
-            </div>
-            <small>허용 오차를 넘으면 연결 강도를 낮춰 재시도하며 실제 적용 강도를 아래에 표시합니다. 이 보간을 적용한 뒤 목표시간 자동 배정을 사용할 수 있습니다. 기존 끝단 등속 설정은 먼저 해제해 주세요. 관절 제한 근처에서는 여유가 있는 다른 IK 해를 먼저 찾으며 기계적 경계에는 작은 여유를 남깁니다.</small>
-            <button id="applyRefinement" class="button secondary full">설정 적용 후 경로 계산</button>
+            <details id="refinementAdvanced" class="refinement-advanced">
+              <summary>고급 설정</summary>
+              <small>기본 연결 강도는 100%입니다. 더 많이 감속해야 할 때만 강도를 낮추세요. 이동 속도는 별도 설정입니다.</small>
+              <label for="refinementAutomatic"><input id="refinementAutomatic" type="checkbox" checked> 중간점 수 자동 계산</label>
+              <small>이동 거리·회전량·관절 변화량에 맞춰 구간별로 나누고, 계산 후 오차를 검사합니다.</small>
+              <label id="refinementManualPoints" for="refinementSubdivisions" hidden>두 지점 사이에 추가할 중간점 수
+                <input id="refinementSubdivisions" type="number" min="0" max="255" step="1" value="9">
+              </label>
+              <label for="refinementStrength">연결 강도 <output id="refinementStrengthValue">100%</output>
+                <input id="refinementStrength" type="range" min="0" max="100" step="1" value="100">
+              </label>
+              <label for="refinementStrengthNumber">연결 강도 직접 입력 (%)
+                <input id="refinementStrengthNumber" type="number" min="0" max="100" step="1" value="100">
+              </label>
+              <p id="refinementStrengthHelp"></p>
+              <small>0%는 저장한 지점마다 정지, 100%는 최대한 연결합니다. 대기시간이 있는 지점에서는 항상 정지합니다.</small>
+              <div class="refinement-grid">
+                <label for="refinementPosition">위치 허용 오차 (mm)<input id="refinementPosition" type="number" min="0.000001" max="100" step="any" value="1"></label>
+                <label for="refinementOrientation">방향 허용 오차 (°)<input id="refinementOrientation" type="number" min="0.000001" max="180" step="any" value="1"></label>
+                <label for="refinementJoint">관절각 허용 오차 (rad)<input id="refinementJoint" type="number" min="0.000000001" max="1" step="any" value="0.01"></label>
+                <label for="refinementRetries">자동 조정 재시도 (회)<input id="refinementRetries" type="number" min="0" max="8" step="1" value="5"></label>
+              </div>
+              <small>오차 범위를 넘으면 연결 정도를 낮춰 다시 계산합니다. 부드럽게 만든 경로에도 목표시간 자동 배정을 적용할 수 있습니다. 경로 모양이나 연결 정도를 바꿨다면 목표시간을 다시 배정해 주세요.</small>
+            </details>
+            <button id="applyRefinement" class="button secondary full">적용하고 미리보기</button>
             <div id="refinementMonitor" role="status" aria-live="polite"></div>
-            <button id="downloadRefinementReport" type="button" class="button secondary full">보간 진단 JSON 저장</button>
-            <small>명령 샘플의 4배 밀도로 FK 오차를 검사합니다. 현재 자세에서 첫 지점까지의 정렬 이동은 오차 비교에서 제외합니다. 실제 로봇의 추종 오차와 충돌은 이 검사에 포함되지 않습니다.</small>
+            <details class="refinement-diagnostics">
+              <summary>계산 결과 자세히 보기</summary>
+              <pre id="refinementDiagnostics"></pre>
+              <button id="downloadRefinementReport" type="button" class="button secondary full">상세 결과 저장 (JSON)</button>
+              <small>명령 샘플의 4배 밀도로 FK 오차를 검사합니다. 현재 자세에서 첫 지점까지의 정렬 이동은 오차 비교에서 제외합니다.</small>
+            </details>
+            <small class="refinement-scope">계산된 경로를 검사하는 기능입니다. 실제 로봇의 추종 오차와 충돌은 이 검사에 포함되지 않습니다.</small>
           </details>
           <button id="preview" class="button primary full">선택한 팔 계산 및 재생</button>
           <button id="previewBoth" class="button secondary full dual-preview">양팔 경로 계산 및 동시 재생</button>
@@ -281,6 +318,22 @@
       </aside>
     </section>
 
+    <section class="panel waypoint-files-panel" aria-labelledby="waypointFilesTitle">
+      <div class="panel-heading">
+        <div>
+          <span class="eyebrow">WAYPOINT FILES</span>
+          <h2 id="waypointFilesTitle">팔별 실행 파일</h2>
+          <p>여러 JSON 파일을 등록한 뒤, 각 팔에서 사용할 파일 하나를 활성화하세요. 실제 이동은 실행 버튼으로 시작합니다.</p>
+        </div>
+        <div class="heading-actions">
+          <button id="loadWaypointFile" class="button secondary">실행 파일 추가 (여러 개)</button>
+          <input id="waypointFileInput" type="file" accept="application/json,.json" multiple hidden>
+        </div>
+      </div>
+      <div id="waypointFileLibrary" class="waypoint-file-library" aria-live="polite"></div>
+      <p class="waypoint-files-note">전환 전 편집 내용은 목록에 자동 보관됩니다. 등록 목록은 프로그램 종료 시 초기화되므로, 필요한 편집 결과는 ‘이 팔 파일 저장’으로 저장하세요.</p>
+    </section>
+
     <section class="panel waypoint-list-panel">
       <div class="panel-heading waypoint-list-heading">
         <div>
@@ -293,18 +346,29 @@
         </div>
         <div class="heading-actions">
           <button id="saveWaypointFile" class="button secondary">이 팔 파일 저장</button>
-          <button id="loadWaypointFile" class="button secondary">이 팔 파일 불러오기</button>
-          <input id="waypointFileInput" type="file" accept="application/json,.json" hidden>
           <button id="removeLastList" class="button ghost">마지막 삭제</button>
+          <button id="deleteRangeList" class="button ghost" type="button" aria-pressed="false">구간 삭제</button>
           <button id="clearAllList" class="button ghost">전체 삭제</button>
         </div>
       </div>
+      <label class="waypoint-filter"><input id="hideInterpolatedList" type="checkbox"> 보간점 제외 보기 <small>원본 지점만 표시합니다.</small></label>
+      <div id="deleteRangePanel" class="delete-range-panel" hidden>
+        <strong>삭제할 시작점과 끝점을 차례로 클릭하세요.</strong>
+        <div class="delete-range-controls">
+          <label>시작 <select id="deleteRangeStart"></select></label>
+          <label>끝 <select id="deleteRangeEnd"></select></label>
+          <span id="deleteRangeSummary" role="status"></span>
+          <button id="confirmDeleteRange" class="button danger" type="button">선택 구간 삭제</button>
+          <button id="cancelDeleteRange" class="button ghost" type="button">취소</button>
+        </div>
+        <p>시작점과 끝점을 포함해 사이의 모든 지점을 삭제합니다. 숨겨진 보간점도 포함됩니다.</p>
+      </div>
       <div id="equalTimePanel" class="equal-time-panel" hidden>
-        <strong>목표시간 자동 배정</strong>
+        <strong>목표시간 자동 배정 · 끝단 속도 균일화</strong>
         <div class="equal-time-controls">
           <label>시간 기준
             <select id="equalTimeMode">
-              <option value="total">전체 목표시간</option>
+              <option value="total">전체 목표시간 · 끝단 등속</option>
               <option value="segment">구간당 동일 시간</option>
             </select>
           </label>
@@ -316,9 +380,10 @@
           </label>
           <button id="equalTimeAll" class="button secondary">전체 목표시간 적용</button>
           <button id="equalTimeExcept" class="button secondary">선택 구간 제외하고 적용</button>
+          <button id="clearUniformTime" class="button ghost" type="button">기존 구간별 속도 사용</button>
         </div>
-        <p>전체 목표시간은 첫 waypoint 도착부터 마지막 waypoint의 대기 종료까지입니다. 대기 시간과 제외 구간의 기존 시간을 보존하고, 남은 시간을 나머지 구간에 동일하게 배정합니다. 현재 자세에서 첫 waypoint로 정렬하는 시간은 별도입니다. 선택한 팔의 목록 전체를 정순으로 계산합니다.</p>
-        <p>225번 제외는 224→225 이동을 보존한다는 뜻입니다. 적용 시 기존 끝단 등속 설정을 대체하며 거리가 다르면 속도도 달라집니다. 전체 목표시간은 반드시 입력해야 하며, 허용 범위나 샘플 변화량 한도를 통과하지 못하면 기존 설정을 유지합니다. 구간당 시간 모드에서만 빈칸을 자동 계산합니다. 검증은 로봇을 움직이지 않으며 관절 상태 입력이 없으면 첫 waypoint를 시작 자세로 사용합니다.</p>
+        <p>전체 목표시간 모드는 실제 끝단 이동 거리를 기준으로 속도를 고르게 맞춥니다. JOINT 연속 통과와 ‘부드럽게 연결’ 모두 지원하며, 검증된 경로 모양과 구간별 속도 배율은 유지하고 시간축만 조절합니다. 출발·정지, 방향 전환과 관절 제한 때문에 필요한 곳에서 감속합니다.</p>
+        <p>전체 시간은 첫 waypoint 도착부터 마지막 지점의 대기 종료까지이며, 현재 자세에서 첫 지점으로 정렬하는 시간은 별도입니다. 대기와 제외 구간의 기존 시간을 유지합니다. 제외 번호는 하나의 연속 범위로 지정하세요. 225번 제외는 224→225 이동을 뜻합니다. 목표시간을 맞출 수 없으면 기존 설정을 유지합니다. ‘구간당 동일 시간’은 거리와 무관하게 시간을 나누는 별도 모드입니다. 계산·검증은 로봇을 움직이지 않습니다.</p>
         <p id="equalTimeResult" role="status" aria-live="polite">시간 배정 후 검증 결과가 여기에 표시됩니다.</p>
       </div>
       <div id="waypointList" class="waypoint-list">
@@ -344,6 +409,7 @@
         <label><span>종료</span><select id="sequenceEnd" disabled><option>Waypoint 없음</option></select></label>
         <button id="addSequenceStep" class="button primary" disabled>실행 단계 추가</button>
       </div>
+      <label class="waypoint-filter"><input id="hideInterpolatedSequence" type="checkbox"> 보간점 제외 보기 <small>시작·종료는 원본 지점만 선택합니다. 실행에는 사이의 보간점도 포함됩니다.</small></label>
       <div id="executionSequence" class="execution-sequence">
         <div class="waypoint-list-empty">실행할 팔과 waypoint 구간을 추가해 주세요.</div>
       </div>
@@ -449,6 +515,7 @@
 
   <div id="toast" class="toast" role="status"></div>
   <script src="/full_robot_simulator.bundle.js?v=f2-single-port-20261013-1"></script>
-  <script src="/app.js?v=waypoint-refinement-20261016-2"></script>
+  <script src="/app.js?v=refined-uniform-time-20261023-1"></script>
+  <script src="/curve_generator.js?v=start-noise-20261022-1"></script>
 </body>
 </html>

@@ -100,7 +100,7 @@ public:
       "/leader/joint_trajectory_command_broadcaster_left/joint_trajectory");
     publish_enabled_ = declare_parameter<bool>("publish_enabled", false);
     direct_action_enabled_ = declare_parameter<bool>("direct_action_enabled", false);
-    joint_smoothing_enabled_ = declare_parameter<bool>("joint_smoothing_enabled", false);
+    joint_smoothing_enabled_ = declare_parameter<bool>("joint_smoothing_enabled", true);
     const std::string configured_path_mode = declare_parameter<std::string>(
       "path_mode", "linear");
     control_rate_hz_ = declare_parameter<double>("control_rate_hz", 100.0);
@@ -115,6 +115,8 @@ public:
     max_waypoint_dwell_s_ = declare_parameter<double>("max_waypoint_dwell_s", 30.0);
     max_waypoint_speed_scale_ = declare_parameter<double>(
       "max_waypoint_speed_scale", 3.0);
+    max_uniform_tcp_speed_mps_ = declare_parameter<double>(
+      "max_uniform_tcp_speed_mps", 1.8);
     max_joint_step_rad_ = declare_parameter<double>("max_joint_step_rad", 0.05);
     max_cartesian_jog_step_m_ = declare_parameter<double>(
       "max_cartesian_jog_step_m", 0.0025);
@@ -198,6 +200,9 @@ public:
       [this](const std_msgs::msg::Float64MultiArray::SharedPtr message) {
         assign_segment_times(message, true);
       });
+    uniform_total_time_subscription_ = create_subscription<std_msgs::msg::Float64MultiArray>(
+      "~/uniform_total_time", 10,
+      std::bind(&WaypointTelepNode::assign_uniform_total_time, this, std::placeholders::_1));
     waypoint_gripper_subscription_ =
       create_subscription<std_msgs::msg::Float64MultiArray>(
       "~/waypoint_gripper", 10,
@@ -214,9 +219,6 @@ public:
         if (executing_) {publish_error("cannot change path refinement during execution"); return;}
         try {
           const auto settings = parse_path_refinement(message->data);
-          if (settings.enabled && joint_timing_[0] > 0.0) {
-            throw std::invalid_argument("disable joint timing before enabling path refinement");
-          }
           refinement_ = settings;
           refinement_state_publisher_->publish(*message);
           invalidate_plan();
@@ -230,13 +232,11 @@ public:
         if (executing_) {publish_error("cannot change timing during execution"); return;}
         const auto & d = msg->data;
         if (d.size() != 3 || !std::all_of(d.begin(), d.end(), [](double x) {
-            return std::isfinite(x);}) || d[0] < 0.0 || d[0] > 0.10 ||
+            return std::isfinite(x);}) || d[0] < 0.0 || d[0] > max_uniform_tcp_speed_mps_ ||
           d[1] < 0 || d[2] < d[1] || std::floor(d[1]) != d[1] ||
-          std::floor(d[2]) != d[2] || (d[0] > 0 && d[1] < 2))
+          std::floor(d[2]) != d[2] ||
+          (d[0] > 0 && d[1] < 2 && !(d[1] == 0 && d[2] == 0)))
         {publish_error("invalid joint timing [speed_mps, preserve_start, preserve_end]"); return;}
-        if (d[0] > 0.0 && refinement_.enabled) {
-          publish_error("disable path refinement before enabling joint timing"); return;
-        }
         joint_timing_ = d;
         joint_timing_publisher_->publish(*msg);
         invalidate_plan();
@@ -291,7 +291,7 @@ public:
     refinement_diagnostics_publisher_ = create_publisher<std_msgs::msg::String>(
       "~/path_refinement_diagnostics", rclcpp::QoS(32).reliable().transient_local());
     std_msgs::msg::Float64MultiArray initial_refinement;
-    initial_refinement.data = {0, 10, 1, 0.001, 0.017453292519943295, 0.01, 5};
+    initial_refinement.data = {0, 10, 1, 0.001, 0.017453292519943295, 0.01, 5, 1};
     refinement_state_publisher_->publish(initial_refinement);
     std_msgs::msg::Float64MultiArray initial_timing;
     initial_timing.data = joint_timing_;
@@ -397,6 +397,7 @@ private:
       minimum_segment_duration_s_ <= 0.0 ||
       max_waypoint_dwell_s_ <= 0.0 ||
       !std::isfinite(max_waypoint_speed_scale_) || max_waypoint_speed_scale_ < 1.0 ||
+      !std::isfinite(max_uniform_tcp_speed_mps_) || max_uniform_tcp_speed_mps_ <= 0.0 ||
       max_joint_step_rad_ <= 0.0 || max_cartesian_jog_step_m_ <= 0.0 ||
       !std::isfinite(max_tool_path_correction_m_) || max_tool_path_correction_m_ <= 0.0 ||
       max_start_velocity_radps_ < 0.0 ||
@@ -1782,6 +1783,140 @@ private:
       ", speed_scale=" + std::to_string(speed_scale));
   }
 
+  void assign_uniform_total_time(
+    const std_msgs::msg::Float64MultiArray::SharedPtr message)
+  {
+    if (executing_) {publish_error("cannot assign timing while executing"); return;}
+    const auto saved_timing = joint_timing_;
+    const auto saved_start = start_waypoint_index_;
+    const auto saved_end = end_waypoint_index_;
+    const auto saved_positions = current_positions_;
+    const double saved_gripper = current_gripper_position_;
+    const bool saved_ready = joint_state_ready_;
+    const bool offline = !joint_state_is_fresh();
+    auto restore = [&]() {
+        joint_timing_ = saved_timing;
+        start_waypoint_index_ = saved_start;
+        end_waypoint_index_ = saved_end;
+        current_positions_ = saved_positions;
+        current_gripper_position_ = saved_gripper;
+        joint_state_ready_ = saved_ready;
+      };
+    try {
+      if (!chain_ready_ || waypoints_.size() < 2 || (!refinement_.enabled &&
+        (!joint_smoothing_enabled_ || !std::all_of(waypoints_.begin(), waypoints_.end(),
+          [](const Waypoint & w) {return w.interpolation_mode == PathMode::JOINT;}))))
+      {
+        throw std::invalid_argument(
+          "uniform TCP timing requires a continuous or refined JOINT path");
+      }
+      if (message->data.empty() || !std::isfinite(message->data[0]) || message->data[0] <= 0.0) {
+        throw std::invalid_argument("uniform timing requires a positive total duration");
+      }
+      const double target = message->data[0];
+      std::vector<std::size_t> excluded;
+      for (std::size_t i = 1; i < message->data.size(); ++i) {
+        const double v = message->data[i];
+        if (!std::isfinite(v) || std::floor(v) != v || v < 2 || v > waypoints_.size()) {
+          throw std::invalid_argument("invalid preserved waypoint number");
+        }
+        excluded.push_back(static_cast<std::size_t>(v));
+      }
+      std::sort(excluded.begin(), excluded.end());
+      excluded.erase(std::unique(excluded.begin(), excluded.end()), excluded.end());
+      if (!excluded.empty() &&
+        (excluded.back()-excluded.front()+1 != excluded.size() ||
+        excluded.size() >= waypoints_.size()-1))
+      {
+        throw std::invalid_argument("uniform timing requires one contiguous preserved range");
+      }
+      if (offline) {
+        std::vector<double> initial;
+        std::string error;
+        if (!resolve_joint_target(waypoints_.front(), current_positions_, 0, initial, error)) {
+          throw std::runtime_error(error);
+        }
+        current_positions_ = KDL::JntArray(joint_names_.size());
+        for (std::size_t j = 0; j < joint_names_.size(); ++j) {current_positions_(j) = initial[j];}
+        current_gripper_position_ = initial.back();
+        joint_state_ready_ = true;
+      }
+      // Preserve the original joint spline and user speed scales. Its FK arc
+      // derivative, rather than waypoint count, controls the new clock.
+      start_waypoint_index_ = 1;
+      end_waypoint_index_ = waypoints_.size();
+      joint_timing_ = {max_uniform_tcp_speed_mps_,
+        excluded.empty() ? 0.0 : static_cast<double>(excluded.front()),
+        excluded.empty() ? 0.0 : static_cast<double>(excluded.back())};
+      const std::size_t stride = joint_names_.size()+2;
+      auto duration = [&](const Plan & plan) {
+          if (plan.trajectory.points.empty() ||
+            plan.waypoint_targets.data.size() != stride*waypoints_.size())
+          {throw std::runtime_error("uniform plan is missing waypoint arrival times");}
+          const auto & t = plan.trajectory.points.back().time_from_start;
+          return static_cast<double>(t.sec)+1.e-9*t.nanosec-plan.waypoint_targets.data[0];
+        };
+      Plan verified;
+      std::string error;
+      if (!make_plan(verified, error, false)) {throw std::runtime_error(error);}
+      const double minimum = duration(verified);
+      if (target < minimum-0.001) {
+        throw std::invalid_argument("target is shorter than the feasible uniform duration: " +
+          std::to_string(minimum) + " seconds (TCP speed <= " +
+          std::to_string(max_uniform_tcp_speed_mps_ * 1000.0) +
+          " mm/s; joint velocity/acceleration limits also apply)");
+      }
+      double actual = minimum, lo = 0.0, hi = max_uniform_tcp_speed_mps_;
+      // A bounded clock search leaves the geometric curve and every waypoint
+      // scale untouched. Each candidate respects the same joint envelopes.
+      for (unsigned int i = 0; std::abs(actual-target) > 0.001 && i < 28; ++i) {
+        const double speed = (lo+hi)*0.5;
+        joint_timing_[0] = speed;
+        Plan candidate;
+        if (!make_plan(candidate, error, false)) {throw std::runtime_error(error);}
+        actual = duration(candidate);
+        verified = std::move(candidate);
+        if (actual > target) {lo = speed;} else {hi = speed;}
+      }
+      if (std::abs(actual-target) > 0.001) {
+        throw std::runtime_error("uniform target duration did not converge");
+      }
+      const auto committed_timing = joint_timing_;
+      const double alignment = verified.waypoint_targets.data[0];
+      const double execution_total = actual+alignment;
+      start_waypoint_index_ = saved_start;
+      end_waypoint_index_ = saved_end;
+      Plan display;
+      if (saved_start == 1 && selected_end_waypoint_index() == waypoints_.size()) {
+        display = std::move(verified);
+      } else if (!make_plan(display, error, false)) {
+        throw std::runtime_error(error);
+      }
+      restore();
+      joint_timing_ = committed_timing;
+      invalidate_plan();
+      std_msgs::msg::Float64MultiArray timing_message;
+      timing_message.data = joint_timing_;
+      joint_timing_publisher_->publish(timing_message);
+      publish_waypoints();
+      publish_plan(display);
+      double dwell = 0.0;
+      for (const auto & w : waypoints_) {dwell += w.dwell_s;}
+      std::ostringstream status;
+      status << std::setprecision(17) << "WAYPOINT_TIMES_VERIFIED: duration_s=0, updated=" <<
+        waypoints_.size()-1-excluded.size() << ", excluded=" << excluded.size() <<
+        ", max_error_s=0, total_s=" << actual << ", target_total_s=" << target <<
+        ", total_error_s=" << std::abs(actual-target) << ", alignment_s=" << alignment <<
+        ", execution_total_s=" << execution_total << ", fixed_s=" << dwell <<
+        ", speed_mps=" << joint_timing_[0] << ", mode=uniform, reference=" <<
+        (offline ? "first_waypoint" : "live_joint_state");
+      publish_status(status.str());
+    } catch (const std::exception & e) {
+      restore();
+      publish_error(std::string("uniform timing failed; settings restored: ")+e.what());
+    }
+  }
+
   void equal_segment_time_callback(const std_msgs::msg::Float64MultiArray::SharedPtr message)
   {
     assign_segment_times(message, false);
@@ -2586,7 +2721,8 @@ private:
   bool append_retimed_joint_curve(
     Plan & plan, const std::vector<JointSplineKnot> & knots,
     const std::vector<std::vector<double>> & tangents,
-    std::vector<double> & previous, double & elapsed, std::string & error) const
+    std::vector<double> & previous, double & elapsed, std::string & error,
+    const std::vector<bool> & originals = {}) const
   {
     const std::size_t n = knots.size(), dims = previous.size();
     std::vector<double> source(n, 0.0);
@@ -2627,8 +2763,9 @@ private:
     std::vector<Span> spans;
     const double origin = elapsed;
     double end_time = origin;
+    auto original = [&](std::size_t k) {return originals.empty() || originals[k];};
     auto append_hold = [&](std::size_t k) {
-        const double dwell = waypoints_[knots[k].waypoint_index].dwell_s;
+        const double dwell = original(k) ? waypoints_[knots[k].waypoint_index].dwell_s : 0.0;
         if (dwell > 0) {
           spans.push_back({{source[k], 1, 1, 0, end_time},
               {source[k], 1, 1, 0, end_time+dwell}, true});
@@ -2656,14 +2793,14 @@ private:
           spans.push_back({{source[first], 1, 1, 1, end_time},
               {source[last], 1, 1, 1, end_time+h}, false});
           end_time += h;
-          append_waypoint_target(plan, end_time, knots[last].positions);
+          if (original(last)) {append_waypoint_target(plan, end_time, knots[last].positions);}
           append_hold(last);
           first = last;
           continue;
         }
         std::size_t last = first+1;
         while (last+1 < n && !retained(last+1) &&
-          waypoints_[knots[last].waypoint_index].dwell_s <= 0.0) {++last;}
+          (!original(last) || waypoints_[knots[last].waypoint_index].dwell_s <= 0.0)) {++last;}
         std::vector<double> grid;
         const std::size_t count = std::max<std::size_t>(2,
           static_cast<std::size_t>(std::ceil((source[last]-source[first])/.001)));
@@ -2707,6 +2844,7 @@ private:
         }
         // Target timestamps come from the same clock, without adding commands.
         for (std::size_t k = first+1; k <= last; ++k) {
+          if (!original(k)) {continue;}
           auto it = std::lower_bound(clock.begin(), clock.end(), source[k],
             [](const ClockNode & a, double s) {return a.s < s;});
           if (it != clock.begin() &&
@@ -2726,6 +2864,9 @@ private:
       std::size_t span = 0;
       const double period = 1.0/control_rate_hz_;
       const std::size_t count = static_cast<std::size_t>(std::ceil((end_time-origin)/period));
+      if (count + plan.trajectory.points.size() > 250000) {
+        throw std::runtime_error("retimed trajectory sample limit exceeded (250000)");
+      }
       for (std::size_t i = 1; i <= count; ++i) {
         const double t = std::min(origin+i*period, end_time);
         while (span+1 < spans.size() && t > spans[span].b.t) {++span;}
@@ -2899,7 +3040,7 @@ private:
     const std::string & stage, std::size_t attempt, std::size_t subdivisions,
     std::size_t segment, double position, double orientation, double joint,
     const std::string & reason, double effective_smoothing = -1,
-    std::size_t knot_count = 0) const
+    std::size_t knot_count = 0, const std::vector<std::size_t> & segment_counts = {}) const
   {
     std::string escaped;
     for (char c : reason) {
@@ -2921,8 +3062,17 @@ private:
         << ",\"smoothing_percent\":" << refinement_.smoothing * 100
         << ",\"effective_smoothing_percent\":" <<
       (effective_smoothing < 0 ? refinement_.smoothing : effective_smoothing) * 100
-        << ",\"joint_subdivisions\":" << refinement_.subdivisions
-        << ",\"joint_intermediate_points\":" << refinement_.subdivisions - 1
+        << ",\"automatic_subdivisions\":" << (refinement_.automatic_subdivisions ? "true" : "false")
+        << ",\"joint_subdivisions\":" <<
+      (refinement_.automatic_subdivisions ? "null" : std::to_string(refinement_.subdivisions))
+        << ",\"joint_intermediate_points\":" <<
+      (refinement_.automatic_subdivisions ? "null" : std::to_string(refinement_.subdivisions - 1))
+        << ",\"segment_subdivisions\":[";
+    for (std::size_t i = 1; i < segment_counts.size(); ++i) {
+      if (i > 1) {out << ',';}
+      out << segment_counts[i];
+    }
+    out << ']'
         << ",\"knot_count\":" << knot_count
         << ",\"ik_searches\":" << ik_searches_
         << ",\"ik_relaxed_solutions\":" << ik_relaxed_solutions_
@@ -2956,7 +3106,7 @@ private:
       indices.begin() + 1, indices.end(), [this](std::size_t index) {
         return waypoints_[index].interpolation_mode == PathMode::LINEAR;
       });
-    std::size_t subdivisions = refinement_.subdivisions;
+    std::size_t subdivisions = refinement_.automatic_subdivisions ? 1 : refinement_.subdivisions;
     for (std::size_t attempt = 0; attempt <= refinement_.max_refinements; ++attempt) {
       ik_searches_ = 0;
       ik_relaxed_solutions_ = 0;
@@ -2968,14 +3118,6 @@ private:
         "building joint knots", smoothing);
       error.clear();
       try {
-        std::size_t expected_knots = 1;
-        for (std::size_t source = 1; source < indices.size(); ++source) {
-          expected_knots += waypoints_[indices[source]].interpolation_mode == PathMode::LINEAR ?
-            subdivisions : refinement_.subdivisions;
-        }
-        if ((has_cartesian_segment && subdivisions > 4096) || expected_knots > 50000) {
-          throw std::runtime_error("generation limit: at most 4096 subdivisions / 50000 knots");
-        }
         std::vector<std::vector<double>> anchors;
         KDL::JntArray seed = current_positions_;
         for (auto index : indices) {
@@ -2996,6 +3138,22 @@ private:
             }
             return from_kdl(frame);
           };
+        std::vector<std::size_t> segment_counts(indices.size(), 0);
+        std::size_t expected_knots = 1;
+        for (std::size_t source = 1; source < indices.size(); ++source) {
+          const bool cartesian = waypoints_[indices[source]].interpolation_mode == PathMode::LINEAR;
+          const std::size_t base_count = refinement_.automatic_subdivisions ?
+            automatic_segment_subdivisions(
+            fk(anchors[source - 1]), fk(anchors[source]), anchors[source - 1], anchors[source]) :
+            refinement_.subdivisions;
+          const std::size_t count = cartesian ?
+            (refinement_.automatic_subdivisions ? base_count * subdivisions : subdivisions) : base_count;
+          if (count > 4096 || expected_knots + count > 50000) {
+            throw std::runtime_error("generation limit: at most 4096 subdivisions / 50000 knots");
+          }
+          segment_counts[source] = count;
+          expected_knots += count;
+        }
         // Each original segment retains its Cartesian or joint-space reference.
         const auto reference = [&](std::size_t source, double t) {
             const auto & goal = waypoints_[indices[source]];
@@ -3012,8 +3170,7 @@ private:
         for (std::size_t source = 1; source < indices.size(); ++source) {
           failing_segment = indices[source] + 1;
           const auto & goal = waypoints_[indices[source]];
-          const std::size_t segment_count = goal.interpolation_mode == PathMode::LINEAR ?
-            subdivisions : refinement_.subdivisions;
+          const std::size_t segment_count = segment_counts[source];
           double duration = joint_segment_duration_s(
             anchors[source - 1], anchors[source], goal.speed_scale);
           if (goal.interpolation_mode == PathMode::LINEAR) {
@@ -3092,6 +3249,11 @@ private:
         if (!append_joint_dwell(candidate, anchors[0], waypoints_[indices[0]].dwell_s, previous, elapsed, error)) {
           throw std::runtime_error(error);
         }
+        // Retiming starts after the same measured-pose alignment and first
+        // dwell. Keep the validated refined polynomial and its exact tangents.
+        const Plan timing_prefix = joint_timing_[0] > 0.0 ? candidate : Plan();
+        const auto timing_previous = previous;
+        const double timing_elapsed = elapsed;
         double curve_time = elapsed;
         double next_command_time = elapsed + 1.0 / control_rate_hz_;
         bool within_tolerance = true;
@@ -3185,11 +3347,30 @@ private:
           }
         }
         if (within_tolerance) {
+          if (joint_timing_[0] > 0.0 && knots.size() > 1) {
+            std::vector<JointSplineKnot> clock_knots;
+            std::vector<bool> original_knots;
+            for (const auto & knot : knots) {
+              clock_knots.push_back({indices[knot.source], knot.q, knot.duration});
+              original_knots.push_back(knot.original);
+            }
+            Plan timed = timing_prefix;
+            auto timed_previous = timing_previous;
+            double timed_elapsed = timing_elapsed;
+            if (!append_retimed_joint_curve(timed, clock_knots, tangent,
+                timed_previous, timed_elapsed, error, original_knots))
+            {
+              // A clock constraint must not silently reduce geometric
+              // smoothing to find a different path during the speed search.
+              return false;
+            }
+            candidate = std::move(timed);
+          }
           plan = std::move(candidate);
           refinement_diagnostic("success", attempt + 1, subdivisions, 0,
             max_position, max_orientation, max_joint,
-            "verified at 4x command density; fixed JOINT subdivisions; original waypoints and dwell preserved; initial alignment excluded",
-            smoothing, knots.size());
+            "verified at 4x command density; original waypoints and dwell preserved; initial alignment excluded",
+            smoothing, knots.size(), segment_counts);
           return true;
         }
       } catch (const std::exception & e) {error = e.what();}
@@ -3499,7 +3680,7 @@ private:
   std::string external_command_topic_;
   bool publish_enabled_{false};
   bool direct_action_enabled_{false};
-  bool joint_smoothing_enabled_{false};
+  bool joint_smoothing_enabled_{true};
   PathRefinement refinement_;
   mutable std::size_t ik_searches_{0};
   mutable std::size_t ik_relaxed_solutions_{0};
@@ -3524,6 +3705,7 @@ private:
   double minimum_segment_duration_s_{0.50};
   double max_waypoint_dwell_s_{30.0};
   double max_waypoint_speed_scale_{3.0};
+  double max_uniform_tcp_speed_mps_{1.8};
   double max_joint_step_rad_{0.05};
   double max_cartesian_jog_step_m_{0.0025};
   double max_tool_path_correction_m_{0.05};
@@ -3591,6 +3773,8 @@ private:
     equal_segment_time_subscription_;
   rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr
     equal_total_time_subscription_;
+  rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr
+    uniform_total_time_subscription_;
   rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr
     waypoint_gripper_subscription_;
   rclcpp::Subscription<std_msgs::msg::Int32MultiArray>::SharedPtr

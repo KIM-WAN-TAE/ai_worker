@@ -26,7 +26,7 @@
     path_mode: linear
     # Optional pass-through spline for an all-JOINT selected range. The UI can
     # toggle this per arm; false preserves the original stop-at-each-point plan.
-    joint_smoothing_enabled: false
+    joint_smoothing_enabled: true
     control_rate_hz: 100.0
     # Display-only world poses are independent of 100 Hz command streaming.
     display_rate_hz: 20.0
@@ -43,7 +43,10 @@
     # Dense 50 Hz replay waypoints need about 25.1x to overcome the configured
     # 0.50 s minimum segment duration while preserving their recorded timing.
     # The existing joint-step check still rejects unsafe 100 Hz discontinuities.
-    max_waypoint_speed_scale: 30.0
+    max_waypoint_speed_scale: 90.0
+    # Uniform timing searches up to 20 mm/s * 90. Joint velocity,
+    # acceleration and sample-step limits still bound the resulting trajectory.
+    max_uniform_tcp_speed_mps: 1.8
     max_joint_step_rad: 0.05
     # Keyboard Cartesian jog is limited to 2.5 mm per accepted request. The UI
     # sends 0.25 mm steps at its default 5 mm/s setting.

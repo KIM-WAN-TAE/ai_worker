@@ -421,9 +421,43 @@ td:first-child { padding-left: 20px; text-align: left; font-weight: 750; }
 .path-refinement input[type="range"] { width: 100%; }
 .path-refinement p, .path-refinement small { display: block; line-height: 1.6; margin: 8px 0; }
 .refinement-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-.refinement-presets { display: flex; flex-wrap: wrap; gap: 5px; }
-.refinement-presets button { padding: 6px; border: 1px solid #c8d3df; border-radius: 5px; background: #f6f9fc; cursor: pointer; }
-.refinement-presets button[aria-pressed="true"] { background: #d9e9ff; border-color: #1264df; }
+.path-refinement [hidden] { display: none; }
+.path-refinement .refinement-toggle { display: flex; gap: 9px; align-items: flex-start; cursor: pointer; }
+.refinement-toggle input { margin: 3px 0 0; accent-color: var(--blue); }
+.refinement-toggle strong { font-size: 13px; }
+.refinement-toggle small { color: var(--muted); margin: 4px 0; }
+.refinement-advanced, .refinement-diagnostics { margin: 14px 0; border-top: 1px solid #e2e8f0; padding-top: 12px; }
+.refinement-advanced summary, .refinement-diagnostics summary { color: var(--muted); font-size: 11px; font-weight: 500; margin-bottom: 0; }
+.refinement-advanced[open] summary, .refinement-diagnostics[open] summary { margin-bottom: 10px; }
+.refinement-scope, #refinementStrengthHelp, #refinementSamplingHint, #refinementConnectionHint { color: var(--muted); font-size: 11px; }
 #refinementMonitor { margin: 10px 0; padding: 8px; background: #f2f6fa; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.7; }
+#refinementDiagnostics { max-height: 260px; overflow: auto; margin: 10px 0; padding: 10px; background: #f2f6fa; font-size: 11px; white-space: pre-wrap; overflow-wrap: anywhere; }
 #refinementMonitor[data-stage="failed"] { background: #fff0ee; color: #9b2920; }
 #refinementMonitor[data-stage="success"] { background: #e9f8ef; color: #21643c; }
+.waypoint-filter { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 12px 0; font-weight: 600; }
+.waypoint-filter input { width: auto; }
+.waypoint-filter small { font-weight: 400; color: var(--muted, #65748b); }
+.delete-range-panel { padding: 16px; margin: 14px 0; border: 1px solid #efb3b3; border-radius: 12px; background: #fff6f6; }
+.delete-range-panel[hidden] { display: none; }
+.delete-range-controls { display: flex; align-items: end; gap: 12px; flex-wrap: wrap; margin: 12px 0; }
+.delete-range-controls label { display: grid; gap: 5px; max-width: 100%; }
+.delete-range-controls select { max-width: 320px; }
+.delete-range-panel p { margin-bottom: 0; color: #874444; }
+.waypoint-item.delete-selected { border-color: #d84949; background: #fff0f0; box-shadow: 0 0 0 1px #d84949; }
+.range-delete-mode .waypoint-item { cursor: pointer; }
+.range-delete-mode .waypoint-item-actions { pointer-events: none; opacity: .45; }
+.button[aria-pressed="true"]#deleteRange, .button[aria-pressed="true"]#deleteRangeList { color: #b52626; border-color: #d84949; background: #fff0f0; }
+.waypoint-files-panel { margin-bottom: 20px; }
+.waypoint-file-library { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.waypoint-file-arm { min-width: 0; border: 1px solid #e4e8ed; border-radius: 12px; padding: 16px; }
+.waypoint-file-arm h3 { margin: 0 0 12px; font-size: 15px; }
+.waypoint-file-status, .waypoint-files-note, .waypoint-file-empty { color: #606c80; font-size: 12px; line-height: 1.6; }
+.waypoint-file-status { margin-bottom: 12px; }
+.waypoint-file-row { display: flex; align-items: center; gap: 10px; padding: 10px; margin-top: 8px; border: 1px solid #e4e8ed; border-radius: 8px; }
+.waypoint-file-row.active { border-color: #0a9b73; background: #f1fbf6; }
+.waypoint-file-info { min-width: 0; flex: 1; }
+.waypoint-file-info strong { display: block; overflow-wrap: anywhere; font-size: 13px; }
+.waypoint-file-info small { display: block; margin-top: 4px; color: #606c80; }
+.waypoint-file-row .button { flex-shrink: 0; padding: 7px 10px; font-size: 12px; }
+.waypoint-files-note { margin: 12px 0 0; }
+@media (max-width: 800px) { .waypoint-file-library { grid-template-columns: 1fr; } }

@@ -27,6 +27,8 @@
   <exec_depend>ament_index_python</exec_depend>
   <exec_depend>ffw_bringup</exec_depend>
   <exec_depend>rclpy</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-pykdl</exec_depend>
 
   <test_depend>ament_cmake_gtest</test_depend>
   <test_depend>ament_cmake_pytest</test_depend>

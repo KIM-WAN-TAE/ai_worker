@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>곡선 경로 만들기</title>
+  <link rel="stylesheet" href="/generator.css">
+  <link rel="stylesheet" href="/curve_generator.css">
+</head>
+<body>
+  <header class="topbar"><a class="brand" href="/curve-generator"><span class="brand-mark">WP</span><strong>곡선 경로 만들기</strong></a><nav><a href="/">Waypoint Teleop</a></nav></header>
+  <main>
+    <section class="hero"><div><h1>구간을 골라 곡선 경로 만들기</h1><p>원하는 구간마다 곡선 또는 직선을 선택하세요. 중간점과 스무딩은 자동으로 계산합니다.</p></div></section>
+    <section class="layout curve-layout">
+      <div class="steps">
+        <article class="card">
+          <div class="step-heading"><span class="step-number">1</span><div><h2>기준 경로 선택</h2><p>기존 파일을 불러오거나 Teleop에 있는 경로를 사용하세요.</p></div></div>
+          <label class="file-drop" for="curveFile"><input id="curveFile" type="file" accept=".json,application/json"><span>JSON 파일 선택</span><strong id="curveFileName">기준 경로를 선택하세요</strong></label>
+          <div class="curve-current"><select id="curveArm" aria-label="현재 경로의 팔"><option value="right">오른팔</option><option value="left">왼팔</option></select><button id="loadCurrent" class="button secondary" type="button">현재 Teleop 경로 사용</button></div>
+        </article>
+        <article class="card">
+          <div class="step-heading"><span class="step-number">2</span><div><h2>구간과 연결 방식 선택</h2><p>끝점을 고르고 곡선 또는 직선을 선택하세요. 구간은 자유롭게 추가할 수 있습니다.</p></div></div>
+          <div id="curveSegments">기준 경로를 먼저 선택해 주세요.</div>
+          <button id="addSegment" class="button secondary" type="button" disabled>+ 구간 추가</button>
+          <p id="anchorHint" class="hint">각 구간 끝점의 위치·자세·그리퍼·대기시간을 유지합니다. 선택한 구간만 새 경로로 저장합니다.</p>
+        </article>
+        <article class="card">
+          <div class="step-heading"><span class="step-number">3</span><div><h2>생성 및 검사</h2><p>곡선 정도가 0이면 직선이 됩니다. 스무딩은 별도로 자동 적용합니다.</p></div></div>
+          <p id="curveHint" class="hint"></p>
+          <details class="curve-advanced"><summary>고급 설정</summary>
+            <label>만들 경로 수<input id="curveCount" type="number" min="1" max="30" value="1" step="1"></label>
+            <label>최대 곡선 편차 (mm)<input id="curveWidth" type="number" min="0.1" max="10" value="3" step="0.1"></label>
+            <label>랜덤 시드<input id="curveSeed" type="number" min="0" max="2147483647" value="42" step="1"></label>
+            <small>같은 설정과 시드로 같은 결과를 만듭니다. 시작점 위치·방향의 범위는 첫 시작점 옵션에서 정합니다.</small>
+          </details>
+          <button id="createCurves" class="button primary" disabled>경로 생성하고 검사</button>
+          <p id="curveStatus" role="status" aria-live="polite">기준 경로를 선택해 주세요.</p>
+        </article>
+      </div>
+      <aside class="preview-column">
+        <article class="card preview-card">
+          <h2>경로 미리보기</h2>
+          <p>회색은 직선 기준, 파랑은 곡선, 초록은 직선 삽입 구간입니다.</p>
+          <canvas id="curveCanvas" width="720" height="480" aria-label="접근 및 삽입 경로 미리보기"></canvas>
+          <div class="curve-views"><button id="viewXZ" class="button secondary" type="button" aria-pressed="true">옆에서 XZ</button><button id="viewYZ" class="button secondary" type="button" aria-pressed="false">앞에서 YZ</button><button id="viewXY" class="button secondary" type="button" aria-pressed="false">위에서 XY</button></div>
+          <small id="previewHint">생성 전에는 예상 모양을 표시합니다. 생성 후에는 검사한 관절 경로의 FK 결과를 표시합니다.</small>
+        </article>
+        <article id="curveResult" class="card" hidden>
+          <h2>검사 완료</h2><p id="curveResultText"></p>
+          <div class="curve-downloads"><button id="saveCurve" class="button primary" type="button">Waypoint JSON 저장</button><button id="saveCurveZip" class="button secondary" type="button">전체 경로·검증 결과 저장</button></div>
+          <p>원래 Teleop 목록은 유지됩니다. 저장한 Waypoint JSON을 Teleop에서 불러오면 됩니다.</p>
+          <details><summary>검사 결과 자세히 보기</summary><pre id="curveDiagnostics"></pre></details>
+        </article>
+        <p class="curve-scope">IK·관절 제한·Cartesian → JOINT 보간·직선 오차를 독립 계획기로 검사합니다. 실제 로봇 구동, 충돌 및 실제 추종 오차 검사는 포함하지 않습니다.</p>
+      </aside>
+    </section>
+  </main>
+  <script src="/curve_generator.js"></script>
+</body>
+</html>

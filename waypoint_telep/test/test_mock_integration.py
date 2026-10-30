@@ -73,7 +73,8 @@ class WaypointProcess:
 
     def __init__(self, publish_enabled=False, tip_link='end_effector_l_link',
                  action_topic='/test/follow_joint_trajectory', arm=None,
-                 max_waypoint_speed_scale=None, quiet=False, max_joint_step_rad=None):
+                 max_waypoint_speed_scale=None, quiet=False, max_joint_step_rad=None,
+                 joint_smoothing_enabled=False, max_uniform_tcp_speed_mps=None):
         prefix = Path(get_package_prefix('waypoint_telep'))
         executable = prefix / 'lib' / 'waypoint_telep' / 'waypoint_telep_node'
         command = [
@@ -95,8 +96,12 @@ class WaypointProcess:
             command.extend([
                 '-p', f'max_waypoint_speed_scale:={max_waypoint_speed_scale}',
             ])
+        if joint_smoothing_enabled is not None:
+            command.extend(['-p', f'joint_smoothing_enabled:={str(joint_smoothing_enabled).lower()}'])
         if max_joint_step_rad is not None:
             command.extend(['-p', f'max_joint_step_rad:={max_joint_step_rad}'])
+        if max_uniform_tcp_speed_mps is not None:
+            command.extend(['-p', f'max_uniform_tcp_speed_mps:={max_uniform_tcp_speed_mps}'])
         if arm is not None:
             command.extend([
                 '-r', '__ns:=/waypoint_telep',
@@ -728,6 +733,127 @@ def isolated_graph():
             os.environ['ROS_DOMAIN_ID'] = previous_domain
 
 
+@pytest.mark.parametrize('arm', ['left', 'right'])
+def test_curve_generator_validates_in_isolation_and_leaves_live_waypoints_unchanged(isolated_graph, arm):
+    import base64
+    import io
+    import zipfile
+    graph = isolated_graph
+    graph.joint_names = RIGHT_COMMAND_JOINTS if arm == 'right' else LEFT_COMMAND_JOINTS
+    graph.positions = [0., -.6 if arm == 'right' else .6, .15, -1., .2, .3, .1, .9]
+    graph.velocities = [0.]*8
+    process = WaypointProcess(publish_enabled=False, tip_link=f'end_effector_{arm[0]}_link',
+                              max_waypoint_speed_scale=30., quiet=True)
+    ui = WaypointUiProcess(unused_tcp_port(), arm=arm, max_waypoint_speed_scale=30.)
+    try:
+        graph.wait_ready(tip_link=f'end_effector_{arm[0]}_link')
+        wait_for_http(ui.url)
+        graph.wait_for(lambda: http_json(ui.url, '/api/state')[1]['joint_state_fresh'])
+        graph.wait_for(lambda: http_json(ui.url, '/api/robot-model')[1]['status'] == 'ready')
+        for offset in (0., .02, .04):
+            q = list(graph.positions)
+            q[0] += offset
+            assert http_json(ui.url, '/api/waypoints/joint', {'positions_rad': q})[1]['success']
+        original = http_json(ui.url, '/api/waypoints/export')[1]
+        result = http_json(ui.url, '/api/generator/curve-path', dict(
+            waypoint_file=original, count=2, max_deviation_mm=.1, seed=42,
+            start_noise=dict(enabled=True, mode='both', sampling='random',
+                translation_min_mm=[-1.]*3, translation_max_mm=[1.]*3,
+                rotation_min_deg=[-1.]*3, rotation_max_deg=[1.]*3),
+            segments=[dict(start_waypoint=1, end_waypoint=2, mode='CURVE', curve_percent=30),
+                      dict(start_waypoint=2, end_waypoint=3, mode='LINEAR')]), timeout=120)[1]
+        assert result['success'] and len(result['files']) == 2
+        assert result['waypoint_file']['joint_smoothing_enabled'] is True
+        assert all(w['interpolation_mode'] == 'JOINT' for w in result['waypoint_file']['waypoints'])
+        assert result['waypoint_file']['generator']['start_noise']['enabled']
+        assert result['waypoint_file']['waypoints'][0]['position_m'] != original['waypoints'][0]['position_m']
+        for src, dst in zip([2, 3], result['waypoint_file']['generator']['generated_anchor_indices'][1:]):
+            assert result['waypoint_file']['waypoints'][dst-1]['joint_positions_rad'] == original['waypoints'][src-1]['joint_positions_rad']
+        assert all(f['passed'] and f['native_planner'] for f in result['files'])
+        assert all(not f['publish_enabled'] and not f['direct_action_enabled'] for f in result['files'])
+        assert http_json(ui.url, '/api/waypoints/export')[1] == original
+        with zipfile.ZipFile(io.BytesIO(base64.b64decode(result['archive_base64']))) as bundle:
+            assert f'{arm}_curve_01.json' in bundle.namelist()
+            assert f'{arm}_curve_02_trajectory.json' in bundle.namelist()
+        # The downloaded file must also pass the existing public import/preview flow.
+        assert http_json(ui.url, '/api/waypoints/import', result['waypoint_file'])[1]['success']
+        assert http_json(ui.url, '/api/actions/preview', {}, timeout=60)[1]['success']
+        saved = http_json(ui.url, '/api/waypoints/export')[1]
+        assert saved['joint_smoothing_enabled'] is True
+        assert all(w['interpolation_mode'] == 'JOINT' for w in saved['waypoints'])
+        anchors = result['waypoint_file']['generator']['generated_anchor_indices']
+        assert [i+1 for i, w in enumerate(saved['waypoints']) if not w['is_interpolated']] == anchors
+        assert http_json(ui.url, '/api/waypoints/name', dict(index=2, name='이름을 바꾼 보간점'))[1]['success']
+        assert http_json(ui.url, '/api/waypoints/export')[1]['waypoints'][1]['is_interpolated']
+        assert http_json(ui.url, '/api/waypoints/reorder', dict(from_index=2, to_index=3))[1]['success']
+        before_delete = http_json(ui.url, '/api/waypoints/export')[1]
+        assert before_delete['waypoints'][2]['name'] == '이름을 바꾼 보간점'
+        assert before_delete['waypoints'][2]['is_interpolated']
+        assert http_json(ui.url, '/api/sequence/add', dict(arm=arm, start_index=1, end_index=len(saved['waypoints'])))[1]['success']
+        deleted = http_json(ui.url, '/api/waypoints/remove-range', dict(start_index=4, end_index=2,
+            expected_count=len(before_delete['waypoints'])))[1]
+        assert deleted['success'] and deleted['removed_count'] == 3
+        after_delete = http_json(ui.url, '/api/waypoints/export')[1]
+        assert after_delete['waypoints'] == before_delete['waypoints'][:1] + before_delete['waypoints'][4:]
+        assert http_json(ui.url, '/api/state')[1]['execution_sequence'] == []
+        assert http_json(ui.url, '/api/actions/remove_last', {})[1]['success']
+        assert http_json(ui.url, '/api/waypoints/export')[1]['waypoints'] == after_delete['waypoints'][:-1]
+        assert graph.goal_count == 0
+        assert all(not messages for messages in graph.final_commands.values())
+        with urlopen(ui.url+'/curve-generator', timeout=5) as response:
+            assert '구간과 연결 방식 선택'.encode() in response.read()
+    finally:
+        ui.stop()
+        process.stop()
+
+
+@pytest.mark.parametrize('mode', ['JOINT', 'LINEAR'])
+def test_automatic_refinement_uses_per_segment_geometry_and_preserves_waypoints(isolated_graph, mode):
+    graph = isolated_graph
+    graph.joint_names = LEFT_COMMAND_JOINTS
+    graph.positions = [0.0, 0.4, 0.1, -0.5, 0.1, 0.2, 0.0, 0.1]
+    graph.velocities = [0.0] * 8
+    graph.publish_joint_states = True
+    process = WaypointProcess(publish_enabled=False)
+    ui = WaypointUiProcess(unused_tcp_port())
+    try:
+        graph.wait_ready()
+        wait_for_http(ui.url)
+        graph.wait_for(lambda: (
+            http_json(ui.url, '/api/state')[1]['joint_state_fresh'] and
+            http_json(ui.url, '/api/state')[1]['current_world_pose'] is not None))
+        assert http_json(ui.url, '/api/actions/clear', {})[1]['success']
+        assert http_json(ui.url, '/api/state')[1]['path_refinement']['automatic_subdivisions']
+        for offset in (0.0, 0.01, 0.18):
+            q = graph.positions.copy()
+            q[0] += offset
+            assert http_json(ui.url, '/api/waypoints/joint', {'positions_rad': q})[1]['success']
+        for index in (2, 3):
+            assert http_json(ui.url, '/api/waypoints/mode', {'index': index, 'mode': mode})[1]['success']
+        before = http_json(ui.url, '/api/waypoints/export')[1]
+        settings = dict(enabled=True, automatic_subdivisions=True)
+        assert http_json(ui.url, '/api/path-refinement', {'path_refinement': settings})[1]['success']
+        assert http_json(ui.url, '/api/actions/preview', {})[1]['success']
+        graph.wait_for(lambda: http_json(ui.url, '/api/state')[1]['path_refinement_events'][-1]['stage'] == 'success')
+        state = http_json(ui.url, '/api/state')[1]
+        event = state['path_refinement_events'][-1]
+        assert event['stage'] == 'success' and event['automatic_subdivisions'], event
+        assert event['segment_subdivisions'][1] > event['segment_subdivisions'][0]
+        assert event['joint_intermediate_points'] is None
+        assert event['max_position_error_mm'] <= 1.0
+        assert event['max_orientation_error_deg'] <= 1.0
+        assert event['max_joint_error_rad'] <= 0.01
+        exported = http_json(ui.url, '/api/waypoints/export')[1]
+        assert exported['waypoints'] == before['waypoints']
+        assert exported['path_refinement']['automatic_subdivisions'] is True
+        assert http_json(ui.url, '/api/waypoints/import', exported)[1]['success']
+        assert http_json(ui.url, '/api/state')[1]['path_refinement']['automatic_subdivisions']
+        assert not any(graph.final_commands.values()), 'Preview must not command the robot'
+    finally:
+        ui.stop()
+        process.stop()
+
+
 @pytest.mark.parametrize('mode,strength', [('JOINT', 0), ('JOINT', 60), ('LINEAR', 100)])
 def test_refined_path_api_roundtrip_adaptation_and_legacy_restore(isolated_graph, mode, strength):
     graph = isolated_graph
@@ -758,12 +884,13 @@ def test_refined_path_api_roundtrip_adaptation_and_legacy_restore(isolated_graph
         assert http_json(ui.url, '/api/actions/preview', {})[1]['success']
         original = http_json(ui.url, '/api/waypoints/export')[1]
         legacy = http_json(ui.url, '/api/state')[1]['trajectory']
-        settings = dict(enabled=True, subdivisions=1, smoothing_percent=strength,
+        settings = dict(enabled=True, subdivisions=1, smoothing_percent=strength, automatic_subdivisions=False,
                         position_tolerance_mm=0.3, orientation_tolerance_deg=0.2,
                         joint_tolerance_rad=0.002, max_refinements=8)
         assert http_json(ui.url, '/api/path-refinement', {'path_refinement': settings})[1]['success']
         result = http_json(ui.url, '/api/actions/preview', {})[1]
         assert result['success'], result
+        graph.wait_for(lambda: http_json(ui.url, '/api/state')[1]['path_refinement_events'][-1]['stage'] == 'success')
         state = http_json(ui.url, '/api/state')[1]
         events = state['path_refinement_events']
         assert events[-1]['stage'] == 'success', events
@@ -855,7 +982,7 @@ def test_generator_refinement_equal_time_complete_sequence(isolated_graph, arm, 
             'local_offset_mm': [0.5, -0.25, 0.5]})[1]
         assert generated['success']
         source = generated['waypoint_file']['waypoints']
-        settings = dict(enabled=True, subdivisions=8, smoothing_percent=60,
+        settings = dict(enabled=True, subdivisions=8, smoothing_percent=60, automatic_subdivisions=False,
                         position_tolerance_mm=2, orientation_tolerance_deg=2,
                         joint_tolerance_rad=0.02, max_refinements=8)
         http_json(ui.url, '/api/path-refinement', {'path_refinement': settings})
@@ -2573,6 +2700,48 @@ def test_dual_arm_ui_keeps_independent_waypoints_and_trajectories(isolated_graph
         assert right['trajectory']['joint_names'] == RIGHT_COMMAND_JOINTS
         assert left['publish_enabled'] is False
         assert right['publish_enabled'] is False
+
+        # Register two files per arm without changing either live plan. Exercise
+        # the real planner import path while remaining in the isolated ROS graph.
+        files = []
+        for arm in ('left', 'right'):
+            source = http_json(ui_process.url, f'/api/waypoints/export?arm={arm}')[1]
+            for number in (1, 2):
+                data = json.loads(json.dumps(source))
+                data['waypoints'][0]['name'] = f'{arm} 파일 {number}'
+                files.append({'name': f'{arm}_{number}.json', 'waypoint_file': data})
+        result = http_json(ui_process.url, '/api/waypoints/files/add', {'files': files})[1]
+        assert result['success'] and len(result['ids']) == 4
+        for arm in ('left', 'right'):
+            page = http_json(ui_process.url, f'/api/state?arm={arm}')[1]
+            assert page['waypoint_count'] == 2
+            assert len(page['waypoint_files']) == 2
+            assert not any(f['active'] for f in page['waypoint_files'])
+        left_a, left_b, right_a, right_b = result['ids']
+
+        for arm, file_id in [('left', left_a), ('right', right_a)]:
+            assert http_json(ui_process.url, '/api/waypoints/files/activate',
+                             {'arm': arm, 'id': file_id})[1]['success']
+            page = http_json(ui_process.url, f'/api/state?arm={arm}')[1]
+            assert page['waypoints'][0]['name'] == f'{arm} 파일 1'
+            assert len(page['waypoint_files']) == 3  # Includes the previous work.
+            assert [f['id'] for f in page['waypoint_files'] if f['active']] == [file_id]
+        http_json(ui_process.url, '/api/waypoints/name',
+                  {'arm': 'left', 'index': 1, 'name': '편집된 왼팔 파일'})
+        for file_id in (left_b, left_a):
+            assert http_json(ui_process.url, '/api/waypoints/files/activate',
+                             {'arm': 'left', 'id': file_id})[1]['success']
+        page = http_json(ui_process.url, '/api/state?arm=left')[1]
+        assert page['waypoints'][0]['name'] == '편집된 왼팔 파일'
+        other = http_json(ui_process.url, '/api/state?arm=right')[1]
+        assert other['waypoints'][0]['name'] == 'right 파일 1'
+        assert [f['id'] for f in other['waypoint_files'] if f['active']] == [right_a]
+        with pytest.raises(HTTPError) as error:
+            http_json(ui_process.url, '/api/waypoints/files/remove', {'arm': 'right', 'id': right_a})
+        assert error.value.code == 400
+        assert http_json(ui_process.url, '/api/waypoints/files/remove',
+                         {'arm': 'right', 'id': right_b})[1]['success']
+        assert not graph.final_commands['left'] and not graph.final_commands['right']
     finally:
         graph.joint_names = LEFT_COMMAND_JOINTS
         graph.positions = [0.0] * 8
@@ -3060,3 +3229,245 @@ def test_dual_arm_sequence_executes_selected_ranges_in_order(isolated_graph):
         ui.stop()
         right_planner.stop()
         left_planner.stop()
+
+
+@pytest.mark.parametrize('tcp_cap,success', [(0.1, False), (1.8, True)])
+def test_uniform_timing_can_exceed_old_tcp_cap_and_round_trip(isolated_graph, tcp_cap, success):
+    graph = isolated_graph
+    graph.joint_names = LEFT_COMMAND_JOINTS
+    graph.positions = [0.0] * 8
+    graph.velocities = [0.0] * 8
+    process = WaypointProcess(publish_enabled=False, quiet=True,
+                              max_uniform_tcp_speed_mps=tcp_cap)
+    ui = WaypointUiProcess(unused_tcp_port())
+    try:
+        graph.wait_ready()
+        wait_for_http(ui.url)
+        graph.wait_for(lambda: http_json(ui.url, '/api/state')[1]['status'].startswith('MODEL_READY:'))
+        http_json(ui.url, '/api/actions/select_joint', {})
+        for q4 in (0.0, -2.5):
+            positions = [0.0] * 8
+            positions[3] = q4
+            http_json(ui.url, '/api/waypoints/joint', {'positions_rad': positions})
+        http_json(ui.url, '/api/joint-smoothing', {'enabled': True})
+        before = http_json(ui.url, '/api/waypoints/export')[1]
+        payload = {'total_duration_s': 8.0, 'distribution': 'uniform'}
+        if not success:
+            with pytest.raises(HTTPError) as error:
+                http_json(ui.url, '/api/waypoints/equal-time', payload, timeout=180)
+            assert 'shorter than the feasible uniform duration' in str(error.value)
+            assert http_json(ui.url, '/api/waypoints/export')[1] == before
+        else:
+            result = http_json(ui.url, '/api/waypoints/equal-time', payload, timeout=180)[1]
+            assert result['verified'] and result['total_error_s'] <= 0.001
+            assert result['speed_mps'] > 0.1
+            saved = http_json(ui.url, '/api/waypoints/export')[1]
+            assert saved['waypoints'] == before['waypoints']
+            graph.wait_for(lambda: graph.trajectories and len(graph.trajectories[-1].points) > 1)
+            points = graph.trajectories[-1].points
+            assert max(abs(a-b) for old, new in zip(points, points[1:])
+                       for a, b in zip(old.positions, new.positions)) <= 0.05 + 1e-9
+            assert http_json(ui.url, '/api/waypoints/import', saved)[1]['success']
+            assert http_json(ui.url, '/api/waypoints/export')[1] == saved
+        assert graph.goal_count == 0
+    finally:
+        try:
+            ui.stop()
+        finally:
+            process.stop()
+
+
+@pytest.mark.parametrize('refined', [False, True])
+@pytest.mark.parametrize('reference_path', [None, pytest.param(
+    os.environ.get('WAYPOINT_UNIFORM_TIME_REFERENCE_JSON'),
+    marks=pytest.mark.skipif(not os.environ.get('WAYPOINT_UNIFORM_TIME_REFERENCE_JSON'),
+                             reason='no uniform timing reference file'))])
+def test_uniform_total_time_uses_actual_tcp_speed_and_preserves_curve(isolated_graph, reference_path, refined):
+    if reference_path is None and os.environ.get('WAYPOINT_UNIFORM_TEST_REAL_ONLY'):
+        pytest.skip('real reference requested')
+    graph = isolated_graph
+    reference = json.loads(Path(reference_path).read_text()) if reference_path else None
+    arm = reference['arm'] if reference else 'left'
+    graph.joint_names = RIGHT_COMMAND_JOINTS if arm == 'right' else LEFT_COMMAND_JOINTS
+    graph.positions = list(reference['waypoints'][0]['joint_positions_rad']) if reference else [0.0]*8
+    graph.velocities = [0.0]*8
+    graph.publish_joint_states = False
+    process = WaypointProcess(publish_enabled=False, tip_link=f'end_effector_{arm[0]}_link',
+                              max_waypoint_speed_scale=30.0, quiet=True)
+    ui = WaypointUiProcess(unused_tcp_port(), arm=arm, max_waypoint_speed_scale=30.0)
+    try:
+        graph.wait_ready(tip_link=f'end_effector_{arm[0]}_link')
+        wait_for_http(ui.url)
+        graph.wait_for(lambda: http_json(ui.url, '/api/state')[1]['status'].startswith('MODEL_READY:'))
+        if reference:
+            reference.pop('joint_timing', None)
+            reference.setdefault('path_refinement', {})['enabled'] = refined
+            reference['start_waypoint'], reference['end_waypoint'] = 1, len(reference['waypoints'])
+            http_json(ui.url, '/api/waypoints/import', reference, timeout=300)
+        else:
+            http_json(ui.url, '/api/actions/select_joint', {})
+            for q4 in (0., .002, .01, .05, .10, .20, .30):
+                q = [0.0]*8
+                q[3] = q4
+                http_json(ui.url, '/api/waypoints/joint', {'positions_rad': q})
+            http_json(ui.url, '/api/joint-smoothing', {'enabled': True})
+            if refined:
+                http_json(ui.url, '/api/path-refinement', {'path_refinement': dict(
+                    enabled=True, automatic_subdivisions=False, subdivisions=5, smoothing_percent=60)})
+                http_json(ui.url, '/api/waypoints/dwell', {'index': 3, 'dwell_s': .12})
+        before = http_json(ui.url, '/api/waypoints/export')[1]
+        target = float(os.environ.get('WAYPOINT_UNIFORM_TARGET_S', '180')) if reference else 15.0
+        def speed_samples():
+            points = graph.trajectories[-1].points
+            poses = graph.paths[-1].poses
+            if len(poses) != len(points)+1:
+                raise AssertionError('TCP poses and trajectory samples are not synchronized')
+            samples = []
+            for i, point in enumerate(points):
+                t = point.time_from_start.sec+point.time_from_start.nanosec*1e-9
+                old = points[i-1].time_from_start if i else None
+                dt = t-(old.sec+old.nanosec*1e-9 if old else 0.)
+                a, b = poses[i].pose.position, poses[i+1].pose.position
+                samples.append([t, math.sqrt((a.x-b.x)**2+(a.y-b.y)**2+(a.z-b.z)**2)/dt*1000])
+            return samples
+        baseline_samples = None
+        if reference and os.environ.get('WAYPOINT_UNIFORM_REPORT_JSON'):
+            graph.publish_joint_states = True
+            graph.wait_for(lambda: http_json(ui.url, '/api/state')[1]['joint_state_fresh'])
+            http_json(ui.url, '/api/actions/preview', {})
+            graph.wait_for(lambda: graph.trajectories and graph.paths and
+                           len(graph.paths[-1].poses) == len(graph.trajectories[-1].points)+1)
+            baseline_samples = speed_samples()
+            graph.publish_joint_states = False
+            time.sleep(.4)
+        plan_counts = len(graph.trajectories), len(graph.paths), len(graph.waypoint_targets)
+        result = http_json(ui.url, '/api/waypoints/equal-time',
+                           {'total_duration_s': target, 'distribution': 'uniform'}, timeout=180)[1]
+        graph.wait_for(lambda: len(graph.trajectories) > plan_counts[0]
+                       and len(graph.paths) > plan_counts[1]
+                       and len(graph.waypoint_targets) > plan_counts[2]
+                       and len(graph.paths[-1].poses) == len(graph.trajectories[-1].points)+1)
+        assert result['verified'] and result['mode'] == 'uniform'
+        assert result['total_error_s'] <= .001
+        assert result['speed_mps'] > 0
+        after = http_json(ui.url, '/api/waypoints/export')[1]
+        assert after['waypoints'] == before['waypoints'], 'timing must preserve every saved joint, scale and pose'
+        assert after['path_refinement'] == before['path_refinement']
+        assert after['joint_smoothing_enabled'] == before['joint_smoothing_enabled']
+        assert after['joint_timing']['preserve_start_waypoint'] == 0
+        assert after['joint_timing']['preserve_end_waypoint'] == 0
+        graph.wait_for(lambda: graph.trajectories and graph.paths and
+                       len(graph.paths[-1].poses) == len(graph.trajectories[-1].points)+1)
+        path_points = graph.paths[-1].poses
+        trajectory = graph.trajectories[-1]
+        arrivals = graph.waypoint_targets[-1].data[::9]
+        speeds = []
+        for i, point in enumerate(trajectory.points):
+            t = point.time_from_start.sec + point.time_from_start.nanosec*1e-9
+            if not arrivals[0]+.05*target < t < arrivals[0]+.95*target or i == 0:
+                continue
+            prev = trajectory.points[i-1].time_from_start
+            dt = t-prev.sec-prev.nanosec*1e-9
+            a, b = path_points[i].pose.position, path_points[i+1].pose.position
+            speeds.append(math.sqrt((a.x-b.x)**2+(a.y-b.y)**2+(a.z-b.z)**2)/dt)
+        moving = sorted(v for v in speeds if v > result['speed_mps']*.01)
+        assert moving
+        peak = moving[-1]/result['speed_mps']
+        near = sum(.9*result['speed_mps'] <= v <= 1.02*result['speed_mps'] for v in moving)/len(moving)
+        assert peak <= 1.03, 'TCP samples must not spike above the requested uniform speed'
+        if not reference:
+            assert near > .95, 'unequal waypoint distances must not create different cruise speeds'
+        else:
+            assert near > .6, 'most moving samples should cruise at the fitted TCP speed'
+        metrics = dict(reference=bool(reference), refined=refined, target_s=target, speed_mmps=result['speed_mps']*1000,
+                              near_uniform_fraction=near, peak_ratio=peak,
+                              p10_mmps=moving[len(moving)//10]*1000,
+                              p90_mmps=moving[len(moving)*9//10]*1000)
+        print(json.dumps(metrics, ensure_ascii=False))
+        if reference and os.environ.get('WAYPOINT_UNIFORM_REPORT_JSON'):
+            Path(os.environ['WAYPOINT_UNIFORM_REPORT_JSON']).write_text(json.dumps(
+                dict(metrics=metrics, result=result, before=baseline_samples, after=speed_samples()),
+                ensure_ascii=False))
+        # The persisted profile must re-plan in a partial range and slow start,
+        # and an impossible target must leave every setting untouched.
+        http_json(ui.url, '/api/waypoints/end', {'index': len(before['waypoints'])-1})
+        if not reference:
+            # Refit with a partial displayed range and no live feedback. The
+            # target still covers the entire saved list, as the UI states.
+            partial = http_json(ui.url, '/api/waypoints/equal-time',
+                                {'total_duration_s': target*1.1, 'distribution': 'uniform'})[1]
+            assert partial['verified'] and partial['total_error_s'] <= .001
+        persisted = http_json(ui.url, '/api/waypoints/export')[1]
+        http_json(ui.url, '/api/waypoints/import', persisted, timeout=300)
+        assert http_json(ui.url, '/api/waypoints/export')[1] == persisted
+        graph.publish_joint_states = True
+        graph.wait_for(lambda: http_json(ui.url, '/api/state')[1]['joint_state_fresh'])
+        http_json(ui.url, '/api/actions/preview', {})
+        assert graph.call('/waypoint_telep/preview_slow_start', timeout=30).success
+        checkpoint = http_json(ui.url, '/api/waypoints/export')[1]
+        with pytest.raises(HTTPError):
+            http_json(ui.url, '/api/waypoints/equal-time',
+                      {'total_duration_s': .0001, 'distribution': 'uniform'}, timeout=180)
+        assert http_json(ui.url, '/api/waypoints/export')[1] == checkpoint
+        assert http_json(ui.url, '/api/waypoints/uniform-time/clear', {})[1]['success']
+        manual = http_json(ui.url, '/api/waypoints/export')[1]
+        assert 'joint_timing' not in manual
+        assert manual['waypoints'] == checkpoint['waypoints']
+        assert manual['path_refinement']['enabled'] is refined
+        assert graph.goal_count == 0
+    finally:
+        graph.publish_joint_states = True
+        try:
+            ui.stop()
+        finally:
+            process.stop()
+
+
+def test_joint_continuity_defaults_on_and_only_applies_to_selected_joint_range(isolated_graph):
+    graph = isolated_graph
+    graph.joint_names = LEFT_COMMAND_JOINTS
+    graph.positions = [0.0]*8
+    graph.velocities = [0.0]*8
+    graph.publish_joint_states = True
+    process = WaypointProcess(publish_enabled=False, joint_smoothing_enabled=None)
+    ui = WaypointUiProcess(unused_tcp_port())
+    try:
+        graph.wait_ready()
+        wait_for_http(ui.url)
+        graph.wait_for(lambda: http_json(ui.url, '/api/state')[1]['joint_state_fresh'])
+        graph.wait_for(lambda: http_json(ui.url, '/api/state')[1]['joint_smoothing_enabled'])
+        http_json(ui.url, '/api/actions/select_joint', {})
+        for q4 in (0., .02, .04):
+            q = [0.0]*8
+            q[3] = q4
+            http_json(ui.url, '/api/waypoints/joint', {'positions_rad': q})
+        # No smoothing request: the node's default is enough for JOINT paths.
+        assert 'JOINT_CONTINUOUS' in http_json(ui.url, '/api/actions/preview', {})[1]['message']
+        saved = http_json(ui.url, '/api/waypoints/export')[1]
+        assert saved['joint_smoothing_enabled'] is True
+        http_json(ui.url, '/api/waypoints/mode', {'index': 3, 'mode': 'LINEAR'})
+        mixed = http_json(ui.url, '/api/actions/preview', {})[1]
+        assert 'MIXED' in mixed['message'] and 'JOINT_CONTINUOUS' not in mixed['message']
+        http_json(ui.url, '/api/waypoints/end', {'index': 2})
+        assert 'JOINT_CONTINUOUS' in http_json(ui.url, '/api/actions/preview', {})[1]['message']
+        http_json(ui.url, '/api/waypoints/import', saved)
+        assert http_json(ui.url, '/api/waypoints/export')[1] == saved
+        assert 'JOINT_CONTINUOUS' in http_json(ui.url, '/api/actions/preview', {})[1]['message']
+        legacy = json.loads(json.dumps(saved))
+        legacy.pop('interpolated_provenance_version', None)
+        legacy['waypoints'][1]['name'] = '왼팔 지점 1-보간1 (1→2)'
+        legacy['waypoints'][1]['is_interpolated'] = False
+        http_json(ui.url, '/api/waypoints/import', legacy)
+        migrated = http_json(ui.url, '/api/waypoints/export')[1]
+        assert migrated['interpolated_provenance_version'] == 2
+        assert [w['is_interpolated'] for w in migrated['waypoints']] == [False, True, False]
+        http_json(ui.url, '/api/waypoints/name', {'index': 2, 'name': '사용자가 바꾼 이름'})
+        http_json(ui.url, '/api/waypoints/reorder', {'from_index': 2, 'to_index': 3})
+        renamed = http_json(ui.url, '/api/waypoints/export')[1]
+        assert renamed['waypoints'][2]['is_interpolated'] is True
+        http_json(ui.url, '/api/waypoints/import', renamed)
+        assert http_json(ui.url, '/api/waypoints/export')[1] == renamed
+        assert graph.goal_count == 0
+    finally:
+        ui.stop()
+        process.stop()

@@ -55,6 +55,9 @@ install(PROGRAMS scripts/waypoint_stream_worker.py
   DESTINATION lib/${PROJECT_NAME}
   RENAME waypoint_stream_worker
 )
+install(PROGRAMS scripts/waypoint_curve_generator.py
+  DESTINATION lib/${PROJECT_NAME}
+)
 install(DIRECTORY config launch web
   DESTINATION share/${PROJECT_NAME}
   PATTERN "__pycache__" EXCLUDE
@@ -76,6 +79,8 @@ if(BUILD_TESTING)
   target_link_libraries(test_limit_ik orocos-kdl)
   ament_add_pytest_test(test_mock_integration test/test_mock_integration.py TIMEOUT 240)
   ament_add_pytest_test(test_ui_logic test/test_ui_logic.py TIMEOUT 30)
+  ament_add_pytest_test(test_waypoint_files test/test_waypoint_files.py TIMEOUT 30)
+  ament_add_pytest_test(test_curve_generator test/test_curve_generator.py TIMEOUT 60)
 endif()
 
 ament_package()

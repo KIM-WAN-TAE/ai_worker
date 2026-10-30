@@ -8,6 +8,7 @@ from http.server import BaseHTTPRequestHandler
 from http.server import ThreadingHTTPServer
 import json
 import math
+import re
 from pathlib import Path
 import queue
 import socket
@@ -593,7 +594,9 @@ def parse_equal_segment_time(payload: dict[str, Any], count: int) -> tuple[float
     return float(seconds), excluded
 
 
-def parse_joint_timing(value: Any, count: int) -> dict[str, Any] | None:
+def parse_joint_timing(
+    value: Any, count: int, maximum_speed_mps: float = 1.8
+) -> dict[str, Any] | None:
     if value is None:
         return None
     if not isinstance(value, dict):
@@ -602,10 +605,10 @@ def parse_joint_timing(value: Any, count: int) -> dict[str, Any] | None:
     start = value.get('preserve_start_waypoint')
     end = value.get('preserve_end_waypoint')
     if (isinstance(speed, bool) or not isinstance(speed, (int, float))
-            or not math.isfinite(speed) or not 0 < speed <= 0.1
+            or not math.isfinite(speed) or not 0 < speed <= maximum_speed_mps
             or isinstance(start, bool) or not isinstance(start, int)
             or isinstance(end, bool) or not isinstance(end, int)
-            or not 2 <= start <= end <= count):
+            or not ((start == 0 and end == 0) or 2 <= start <= end <= count)):
         raise ValueError('등속 설정의 속도 또는 삽입 보존 구간이 올바르지 않습니다.')
     return dict(speed_mps=float(speed), preserve_start_waypoint=start,
                 preserve_end_waypoint=end)
@@ -614,14 +617,20 @@ def parse_joint_timing(value: Any, count: int) -> dict[str, Any] | None:
 def parse_path_refinement(value: Any) -> dict[str, Any]:
     defaults = dict(enabled=False, subdivisions=10, smoothing_percent=100.0,
                     position_tolerance_mm=1.0, orientation_tolerance_deg=1.0,
-                    joint_tolerance_rad=0.01, max_refinements=5)
+                    joint_tolerance_rad=0.01, max_refinements=5,
+                    automatic_subdivisions=True)
     if value is None:
         return defaults
     if not isinstance(value, dict):
         raise ValueError('보간 설정은 객체여야 합니다.')
     result = {**defaults, **value}
+    # An existing file/client without the new flag keeps its fixed point count.
+    if 'automatic_subdivisions' not in value:
+        result['automatic_subdivisions'] = False
     if not isinstance(result['enabled'], bool):
         raise ValueError('보간 사용 여부는 true 또는 false여야 합니다.')
+    if not isinstance(result['automatic_subdivisions'], bool):
+        raise ValueError('중간점 자동 계산 여부는 true 또는 false여야 합니다.')
     limits = dict(subdivisions=(1, 256), smoothing_percent=(0, 100),
                   position_tolerance_mm=(0, 100), orientation_tolerance_deg=(0, 180),
                   joint_tolerance_rad=(0, 1), max_refinements=(0, 8))
@@ -703,6 +712,8 @@ class WaypointUiBridge(Node):
             'max_waypoint_dwell_s', 30.0).value)
         self.max_waypoint_speed_scale = float(self.declare_parameter(
             'max_waypoint_speed_scale', 3.0).value)
+        self.max_uniform_tcp_speed_mps = float(self.declare_parameter(
+            'max_uniform_tcp_speed_mps', 1.8).value)
         self.keyboard_jog_period_s = float(self.declare_parameter(
             'keyboard_jog_period_s', 0.05).value)
         self.keyboard_jog_max_speed_mmps = float(self.declare_parameter(
@@ -734,6 +745,8 @@ class WaypointUiBridge(Node):
             or self.max_waypoint_dwell_s <= 0.0
             or not math.isfinite(self.max_waypoint_speed_scale)
             or self.max_waypoint_speed_scale < 1.0
+            or not math.isfinite(self.max_uniform_tcp_speed_mps)
+            or self.max_uniform_tcp_speed_mps <= 0.0
             or self.keyboard_jog_period_s <= 0.0
             or self.keyboard_jog_max_speed_mmps <= 0.0
             or self.keyboard_deadman_timeout_s <= self.keyboard_jog_period_s * 2.0
@@ -744,6 +757,12 @@ class WaypointUiBridge(Node):
         ):
             raise ValueError('waypoint 실행 안전 파라미터가 올바르지 않습니다.')
         self.lock = threading.RLock()
+        self.waypoint_file_lock = threading.RLock()
+        self.waypoint_files: dict[str, dict[str, Any]] = {}
+        self.active_waypoint_files: dict[str, str | None] = {
+            arm: None for arm in self.available_arms
+        }
+        self.next_waypoint_file_id = 1
         self.all_current_positions: dict[str, float] = {}
         self.all_current_velocities: dict[str, float] = {}
         self.joint_state_stamp = 0.0
@@ -780,7 +799,7 @@ class WaypointUiBridge(Node):
                 'execution_events': [],
                 'plan_revision': 0,
                 'path_mode': configured_path_mode,
-                'joint_smoothing_enabled': False,
+                'joint_smoothing_enabled': True,
                 'path_refinement': parse_path_refinement(None),
                 'path_refinement_events': [],
                 'joint_timing': None,
@@ -800,6 +819,7 @@ class WaypointUiBridge(Node):
                 'start_waypoint': 1,
                 'end_waypoint': 1,
                 'waypoint_names': [],
+                'waypoint_interpolated': [],
                 'waypoint_targets': [],
                 'trajectory': None,
                 'trajectory_sequence': 0,
@@ -814,6 +834,7 @@ class WaypointUiBridge(Node):
         self.service_clients: dict[tuple[str, str], Any] = {}
         self.arbiter_clients: dict[str, Any] = {}
         self.service_lock = threading.Lock()
+        self.curve_generation_lock = threading.Lock()
         self.planner_locks = {arm: threading.Lock() for arm in self.available_arms}
         self.joint_waypoint_publishers: dict[str, Any] = {}
         self.absolute_waypoint_publishers: dict[str, Any] = {}
@@ -827,6 +848,7 @@ class WaypointUiBridge(Node):
         self.waypoint_speed_scale_publishers: dict[str, Any] = {}
         self.equal_segment_time_publishers: dict[str, Any] = {}
         self.equal_total_time_publishers: dict[str, Any] = {}
+        self.uniform_total_time_publishers: dict[str, Any] = {}
         self.waypoint_gripper_publishers: dict[str, Any] = {}
         self.waypoint_mode_publishers: dict[str, Any] = {}
         self.joint_smoothing_publishers: dict[str, Any] = {}
@@ -842,7 +864,7 @@ class WaypointUiBridge(Node):
                 JointTrajectory, f'/intervention/waypoint/arm_{arm}', 10)
             for arm in ARMS
         }
-        self.execution_lock = threading.Lock()
+        self.execution_lock = threading.RLock()
         self.execution_thread: threading.Thread | None = None
         self.execution_stop = threading.Event()
         self.execution_arm: str | None = None
@@ -1037,6 +1059,8 @@ class WaypointUiBridge(Node):
                 Float64MultiArray, f'{namespace}/equal_segment_time', 10)
             self.equal_total_time_publishers[selected_arm] = self.create_publisher(
                 Float64MultiArray, f'{namespace}/equal_total_time', 10)
+            self.uniform_total_time_publishers[selected_arm] = self.create_publisher(
+                Float64MultiArray, f'{namespace}/uniform_total_time', 10)
             self.waypoint_gripper_publishers[selected_arm] = self.create_publisher(
                 Float64MultiArray, f'{namespace}/waypoint_gripper', 10)
             self.waypoint_mode_publishers[selected_arm] = self.create_publisher(
@@ -1220,6 +1244,9 @@ class WaypointUiBridge(Node):
                 )
             elif len(names) > len(waypoints):
                 del names[len(waypoints):]
+            flags = arm_state.setdefault('waypoint_interpolated', [])
+            del flags[len(waypoints):]
+            flags.extend([None] * (len(waypoints) - len(flags)))
             arm_state['waypoints'] = waypoints
             arm_state['waypoint_count'] = len(waypoints)
             arm_state['waypoints_update_sequence'] += 1
@@ -1340,6 +1367,27 @@ class WaypointUiBridge(Node):
     def _default_waypoint_name(arm: str, index: int) -> str:
         label = '왼팔' if arm == 'left' else '오른팔'
         return f'{label} 지점 {index}'
+
+    @staticmethod
+    def _interpolated_flags(state: dict[str, Any]) -> list[bool]:
+        # Old exports incorrectly wrote False for the endpoint generator's
+        # Korean names. Migrate only that known format in unversioned files.
+        legacy = r'(?:왼팔|오른팔|왼손|오른손)\s*지점\s*\d+\s*-\s*(?:직선|곡선)?보간\s*\d+(?:\s*\(\s*\d+\s*(?:→|->)\s*\d+\s*\))?'
+        flags = state.get('waypoint_interpolated', [])
+        names = state.get('waypoint_names', [])
+        version = state.get('interpolated_provenance_version', 2)
+        if type(version) is not int or version not in (1, 2):
+            raise ValueError('보간점 표시 버전은 1 또는 2여야 합니다.')
+        result = []
+        for i in range(state['waypoint_count']):
+            name = names[i] if i < len(names) and isinstance(names[i], str) else ''
+            old_generated = bool(re.fullmatch(legacy, name))
+            flag = flags[i] if i < len(flags) else None
+            if old_generated and version < 2:
+                flag = True
+            result.append(flag if isinstance(flag, bool) else old_generated or bool(
+                re.fullmatch(r'구간 \d+ (?:곡선|직선) 중간점 \d+', name)))
+        return result
 
     def _execution_sequence_snapshot(self) -> list[dict[str, Any]]:
         result = []
@@ -1465,7 +1513,9 @@ class WaypointUiBridge(Node):
         )
         trajectory = self._trajectory_snapshot(arm_state['trajectory'])
         waypoints = json.loads(json.dumps(arm_state['waypoints']))
+        interpolated_flags = self._interpolated_flags(arm_state)
         for index, waypoint in enumerate(waypoints):
+            waypoint['is_interpolated'] = interpolated_flags[index]
             waypoint['name'] = (
                 arm_state['waypoint_names'][index]
                 if index < len(arm_state['waypoint_names'])
@@ -1558,12 +1608,17 @@ class WaypointUiBridge(Node):
             'start_waypoint': arm_state['start_waypoint'],
             'end_waypoint': arm_state['end_waypoint'],
             'waypoint_count': arm_state['waypoint_count'],
+            'waypoint_files': self.waypoint_files_snapshot(selected_arm),
+            'interpolated_provenance_version': 2,
             'waypoints': waypoints,
             'execution_sequence': execution_sequence,
             'max_waypoint_dwell_s': self.max_waypoint_dwell_s,
             'max_waypoint_speed_scale': self.max_waypoint_speed_scale,
+            'max_uniform_tcp_speed_mps': self.max_uniform_tcp_speed_mps,
             'equal_segment_time_supported': True,
             'equal_total_time_supported': True,
+            'uniform_total_time_supported': True,
+            'uniform_refinement_supported': True,
             'publish_enabled': self.publish_enabled,
             'execution': {
                 'active': self.execution_thread is not None
@@ -1680,10 +1735,8 @@ class WaypointUiBridge(Node):
         message.header.stamp = self.get_clock().now().to_msg()
         message.name = list(config['joint_names'])
         message.position = positions
-        with self.lock:
-            sequence = self.arm_states[arm]['status_sequence']
-        self.joint_waypoint_publishers[arm].publish(message)
-        status = self._wait_for_status(arm, sequence)
+        status = self._publish_planner_setting(
+            arm, self.joint_waypoint_publishers[arm], message, 'JOINT_WAYPOINT_ADDED:')
         if status.startswith('ERROR:'):
             raise ValueError(status.removeprefix('ERROR:').strip())
         if not status.startswith('JOINT_WAYPOINT_ADDED:'):
@@ -1888,15 +1941,32 @@ class WaypointUiBridge(Node):
             scales_sequence = state['speed_scales_sequence']
             trajectory_sequence = state['trajectory_sequence']
         total_mode = 'total_duration_s' in payload
-        publisher = (self.equal_total_time_publishers if total_mode
-                     else self.equal_segment_time_publishers)[arm]
+        distribution = payload.get('distribution', 'equal')
+        if distribution not in ('equal', 'uniform'):
+            raise ValueError('시간 배정 방식은 equal 또는 uniform이어야 합니다.')
+        uniform_mode = total_mode and distribution == 'uniform'
+        if distribution == 'uniform' and not total_mode:
+            raise ValueError('끝단 등속 배정에는 전체 목표시간이 필요합니다.')
+        if uniform_mode:
+            with self.lock:
+                current = self.arm_states[arm]
+                if (not current['path_refinement']['enabled'] and
+                        (not current['joint_smoothing_enabled']
+                         or any(mode != 'JOINT' for mode in current['waypoint_modes']))):
+                    raise ValueError('끝단 등속 배정은 모든 지점을 JOINT로 설정하고 '
+                                     'JOINT 연속 통과를 켜거나, 부드럽게 연결을 적용한 상태에서 사용해 주세요.')
+            if excluded and excluded != list(range(excluded[0], excluded[-1] + 1)):
+                raise ValueError('끝단 등속 배정의 제외 구간은 연속 번호로 지정해 주세요.')
+        publisher = (self.uniform_total_time_publishers if uniform_mode else
+                     self.equal_total_time_publishers if total_mode else
+                     self.equal_segment_time_publishers)[arm]
         if publisher.get_subscription_count() == 0:
             raise RuntimeError('자동 시간 배정을 지원하는 waypoint 노드를 먼저 실행해 주세요.')
         message = Float64MultiArray()
         message.data = [seconds] + [float(index) for index in excluded]
         publisher.publish(message)
         # The native node validates the complete trajectory before committing.
-        deadline = time.monotonic() + 60.0
+        deadline = time.monotonic() + (180.0 if uniform_mode else 60.0)
         while time.monotonic() < deadline:
             with self.lock:
                 status = self.arm_states[arm]['status']
@@ -1919,7 +1989,8 @@ class WaypointUiBridge(Node):
                 synced = (state['speed_scales_sequence'] > scales_sequence
                           and state['trajectory_sequence'] > trajectory_sequence
                           and state['trajectory'] is not None
-                          and state['joint_timing'] is None)
+                          and (state['joint_timing'] is not None if uniform_mode
+                               else state['joint_timing'] is None))
             if synced:
                 break
             time.sleep(0.01)
@@ -1939,6 +2010,13 @@ class WaypointUiBridge(Node):
                     'execution_total_s', 'fixed_s'):
             result[key] = float(fields[key])
         result['mode'] = fields['mode']
+        if uniform_mode:
+            result['speed_mps'] = float(fields['speed_mps'])
+            return {'success': True, **result, 'message': (
+                f"끝단 등속 시간 배정 완료 · 기준 {result['speed_mps'] * 1000:.3f} mm/s · "
+                f"전체 계획 {result['total_s']:.3f}초 / 목표 {result['target_total_s']:.3f}초 · "
+                f"{result['excluded']}개 구간 보존 · 출발·정지와 관절 제한 구간에서 감속 · "
+                '기존 구간별 속도 배율과 경로 유지')}
         if total_mode:
             return {'success': True, **result, 'message': (
                 f"전체 목표시간 검증 완료 · 목표 {result['target_total_s']:.6f}초 / "
@@ -2007,14 +2085,22 @@ class WaypointUiBridge(Node):
         if status != 'JOINT_TIMING_UPDATED':
             raise RuntimeError(f'등속 시간 배정 설정에 실패했습니다: {status}')
 
+    def clear_joint_timing(self, payload: dict[str, Any]) -> dict[str, Any]:
+        with self.execution_lock:
+            if self._execution_is_active() or self._keyboard_is_active():
+                raise RuntimeError('실행 또는 키보드 제어 중에는 등속 배정을 해제할 수 없습니다.')
+            self._set_joint_timing(self._select_arm(payload.get('arm')), None)
+        return {'success': True, 'message': '끝단 등속을 해제했습니다. 기존 구간별 속도 배율을 사용합니다.'}
+
     def _path_refinement_callback(self, arm: str, message: Float64MultiArray) -> None:
         d = message.data
-        if len(d) != 7:
+        if len(d) not in (7, 8):
             return
         settings = parse_path_refinement(dict(
             enabled=bool(d[0]), subdivisions=int(d[1]), smoothing_percent=d[2] * 100,
             position_tolerance_mm=d[3] * 1000, orientation_tolerance_deg=math.degrees(d[4]),
-            joint_tolerance_rad=d[5], max_refinements=int(d[6])))
+            joint_tolerance_rad=d[5], max_refinements=int(d[6]),
+            automatic_subdivisions=len(d) == 8 and d[7] == 1))
         with self.lock:
             self.arm_states[arm]['path_refinement'] = settings
             self.arm_states[arm]['plan_revision'] += 1
@@ -2039,14 +2125,12 @@ class WaypointUiBridge(Node):
             raise RuntimeError('로봇 제어 중에는 보간 설정을 바꿀 수 없습니다.')
         arm = self._select_arm(payload.get('arm'))
         settings = parse_path_refinement(payload.get('path_refinement'))
-        with self.lock:
-            if settings['enabled'] and self.arm_states[arm]['joint_timing']:
-                raise ValueError('등속 시간 배정이 설정되어 있습니다. 이를 해제한 뒤 보간을 켜세요.')
         message = Float64MultiArray()
         message.data = [float(settings['enabled']), float(settings['subdivisions']),
                         settings['smoothing_percent'] / 100, settings['position_tolerance_mm'] / 1000,
                         math.radians(settings['orientation_tolerance_deg']),
-                        settings['joint_tolerance_rad'], float(settings['max_refinements'])]
+                        settings['joint_tolerance_rad'], float(settings['max_refinements']),
+                        float(settings['automatic_subdivisions'])]
         status = self._publish_planner_setting(
             arm, self.path_refinement_publishers[arm], message, 'PATH_REFINEMENT_UPDATED')
         if status != 'PATH_REFINEMENT_UPDATED':
@@ -2119,6 +2203,7 @@ class WaypointUiBridge(Node):
             while len(state['waypoint_names']) < state['waypoint_count']:
                 state['waypoint_names'].append(
                     self._default_waypoint_name(arm, len(state['waypoint_names']) + 1))
+            state['waypoint_interpolated'] = self._interpolated_flags(state)
             state['waypoint_names'][index - 1] = name
             state['plan_revision'] += 1
         return {'success': True, 'message': f'Waypoint {index} 이름을 “{name}”(으)로 변경했습니다.'}
@@ -2136,6 +2221,7 @@ class WaypointUiBridge(Node):
             if source == target:
                 return {'success': True, 'message': '순서가 변경되지 않았습니다.'}
             names = list(state['waypoint_names'])
+            flags = self._interpolated_flags(state)
             sequence = state['status_sequence']
         message = Int32MultiArray()
         message.data = [source, target]
@@ -2147,8 +2233,10 @@ class WaypointUiBridge(Node):
             raise RuntimeError('waypoint 순서 변경 응답이 없습니다.')
         moved = names.pop(source - 1)
         names.insert(target - 1, moved)
+        flags.insert(target - 1, flags.pop(source - 1))
         with self.lock:
             self.arm_states[arm]['waypoint_names'] = names
+            self.arm_states[arm]['waypoint_interpolated'] = flags
             self.arm_states[arm]['plan_revision'] += 1
             self._clear_sequence_for_arm(arm)
         return {'success': True, 'message': status}
@@ -2200,7 +2288,7 @@ class WaypointUiBridge(Node):
         return {'success': True, 'message': status}
 
     def remove_waypoint(self, payload: dict[str, Any]) -> dict[str, Any]:
-        if self._execution_is_active():
+        if self._execution_is_active() or self._keyboard_is_active():
             raise RuntimeError('실행 중에는 waypoint를 삭제할 수 없습니다.')
         arm = self._select_arm(payload.get('arm'))
         index = parse_waypoint_index(payload)
@@ -2208,6 +2296,8 @@ class WaypointUiBridge(Node):
             state = self.arm_states[arm]
             if index > state['waypoint_count']:
                 raise ValueError('삭제하거나 수정할 waypoint 번호가 목록 밖입니다.')
+            names = list(state['waypoint_names'])
+            flags = self._interpolated_flags(state)
             sequence = state['status_sequence']
         message = UInt32()
         message.data = index
@@ -2219,18 +2309,47 @@ class WaypointUiBridge(Node):
         if not status.startswith(expected):
             raise RuntimeError('지정한 waypoint 삭제 응답이 없습니다.')
         with self.lock:
-            names = self.arm_states[arm]['waypoint_names']
             if index <= len(names):
                 names.pop(index - 1)
-                self.arm_states[arm]['plan_revision'] += 1
+            flags.pop(index - 1)
+            self.arm_states[arm]['waypoint_names'] = names
+            self.arm_states[arm]['waypoint_interpolated'] = flags
+            self.arm_states[arm]['plan_revision'] += 1
             self._clear_sequence_for_arm(arm)
         return {'success': True, 'message': status}
+
+    def remove_waypoint_range(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if self._execution_is_active() or self._keyboard_is_active():
+            raise RuntimeError('실행 또는 키보드 제어 중에는 waypoint를 삭제할 수 없습니다.')
+        arm = self._select_arm(payload.get('arm'))
+        start, end = sorted(parse_waypoint_index({'index': payload.get(key)})
+                            for key in ('start_index', 'end_index'))
+        with self.lock:
+            count = self.arm_states[arm]['waypoint_count']
+            if end > count:
+                raise ValueError('삭제할 구간이 waypoint 목록 밖입니다.')
+            if payload.get('expected_count', count) != count:
+                raise ValueError('Waypoint 목록이 변경되었습니다. 삭제 구간을 다시 선택해 주세요.')
+        removed = 0
+        # Descending indices keep the remaining targets stable. Each deletion
+        # uses the planner acknowledgement; never claim success on a timeout.
+        for index in range(end, start - 1, -1):
+            try:
+                self.remove_waypoint({'arm': arm, 'index': index})
+                removed += 1
+            except (RuntimeError, ValueError) as exception:
+                raise RuntimeError(
+                    f'구간 삭제 중단: {removed}개 삭제가 확인되었습니다. '
+                    f'현재 목록을 확인해 주세요. {exception}') from exception
+        return {'success': True, 'removed_count': removed,
+                'message': f'Waypoint {start}–{end} 구간의 {removed}개 지점을 삭제했습니다.'}
 
     def export_waypoints(self, arm_value: Any = None) -> dict[str, Any]:
         arm = self._select_arm(arm_value)
         snapshot = self.snapshot(arm)
         return {
             'schema': 'ai_worker_waypoints/v1',
+            'interpolated_provenance_version': 2,
             'arm': arm,
             'joint_smoothing_enabled': snapshot['joint_smoothing_enabled'],
             'path_refinement': snapshot['path_refinement'],
@@ -2247,10 +2366,68 @@ class WaypointUiBridge(Node):
                     'dwell_s': waypoint['dwell_s'],
                     'speed_scale': waypoint['speed_scale'],
                     'interpolation_mode': waypoint['interpolation_mode'],
+                    'is_interpolated': waypoint['is_interpolated'],
                 }
                 for waypoint in snapshot['waypoints']
             ],
         }
+
+    def generate_curve_path(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Compute and preview in a separate ROS domain; never edit live waypoints."""
+        if self._execution_is_active() or self._keyboard_is_active():
+            raise RuntimeError('실행 또는 키보드 제어를 마친 뒤 경로를 생성해 주세요.')
+        source = payload.get('waypoint_file')
+        if not isinstance(source, dict):
+            raise ValueError('기준 waypoint JSON이 필요합니다.')
+        points = source.get('waypoints', [])
+        if isinstance(points, list) and all(isinstance(w, dict) for w in points):
+            source = json.loads(json.dumps(source))
+            flags = self._interpolated_flags(dict(
+                waypoint_count=len(points), waypoint_names=[w.get('name', '') for w in points],
+                waypoint_interpolated=[w.get('is_interpolated') for w in points],
+                interpolated_provenance_version=source.get('interpolated_provenance_version', 1)))
+            for w, flag in zip(source['waypoints'], flags):
+                w['is_interpolated'] = flag
+            source['interpolated_provenance_version'] = 2
+            payload = {**payload, 'waypoint_file': source}
+        arm = self._select_arm(source.get('arm'))
+        model = self.robot_model_snapshot(arm)
+        if model.get('status') != 'ready':
+            raise RuntimeError('로봇 모델을 기다리고 있습니다. 연결 후 다시 생성해 주세요.')
+        if not self.curve_generation_lock.acquire(blocking=False):
+            raise RuntimeError('이미 경로를 생성 중입니다. 완료 후 다시 시도해 주세요.')
+        try:
+            worker = Path(__file__).resolve().with_name('waypoint_curve_generator.py')
+            if not worker.is_file():
+                worker = Path(__file__).with_name('waypoint_curve_generator.py')
+            config = dict(payload=payload, arm=arm, model=model,
+                limits=F2_POSITION_LIMITS[arm], max_speed_scale=self.max_waypoint_speed_scale,
+                robot_description=self.robot_description_snapshot())
+            input_data = json.dumps(config, allow_nan=False)
+            try:
+                import os
+                import signal
+                process = subprocess.Popen([sys.executable, str(worker), str(Path(__file__).resolve())],
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True, start_new_session=True)
+                output, errors = process.communicate(input_data, timeout=300)
+            except subprocess.TimeoutExpired as exc:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.communicate()
+                raise RuntimeError('경로 생성 시간이 초과되었습니다. 생성 개수를 줄여 주세요.') from exc
+            except OSError as exc:
+                raise RuntimeError('곡선 생성기 실행에 실패했습니다.') from exc
+            lines = [line.removeprefix('CURVE_RESULT_JSON:') for line in output.splitlines()
+                     if line.startswith('CURVE_RESULT_JSON:')]
+            if process.returncode or not lines:
+                self.get_logger().error('곡선 생성기 실패: '+errors[-1500:])
+                raise RuntimeError('곡선 생성기를 실행하지 못했습니다. 서버 로그를 확인해 주세요.')
+            response = json.loads(lines[-1])
+            if not response.get('success'):
+                raise ValueError(response.get('error', '곡선 경로를 생성하지 못했습니다.'))
+            return response
+        finally:
+            self.curve_generation_lock.release()
 
     def generate_tool_path(self, payload: dict[str, Any]) -> dict[str, Any]:
         if self._execution_is_active():
@@ -2326,23 +2503,121 @@ class WaypointUiBridge(Node):
             'waypoint_file': generated,
         }
 
-    def import_waypoints(self, payload: dict[str, Any]) -> dict[str, Any]:
-        if self._execution_is_active() or self._keyboard_is_active():
-            raise RuntimeError('실행 또는 키보드 제어 중에는 waypoint 파일을 불러올 수 없습니다.')
+    def waypoint_files_snapshot(self, arm: str) -> list[dict[str, Any]]:
+        with self.lock:
+            active_id = self.active_waypoint_files[arm]
+            return [
+                {'id': file_id, 'name': entry['name'], 'active': file_id == active_id,
+                 'waypoint_count': (
+                     self.arm_states[arm]['waypoint_count'] if file_id == active_id
+                     else len(entry['waypoint_file']['waypoints']))}
+                for file_id, entry in self.waypoint_files.items() if entry['arm'] == arm
+            ]
+
+    def _store_waypoint_file(self, name: str, waypoint_file: dict[str, Any]) -> str:
+        # Caller serializes library mutations with waypoint_file_lock.
+        with self.lock:
+            file_id = str(self.next_waypoint_file_id)
+            self.next_waypoint_file_id += 1
+            arm = waypoint_file['arm']
+            self.waypoint_files[file_id] = dict(
+                name=name, arm=arm, waypoint_file=waypoint_file)
+            self.arm_states[arm]['plan_revision'] += 1
+        return file_id
+
+    def add_waypoint_files(self, payload: dict[str, Any]) -> dict[str, Any]:
+        files = payload.get('files')
+        if not isinstance(files, list) or not files:
+            raise ValueError('등록할 waypoint 파일 목록이 필요합니다.')
+        with self.waypoint_file_lock:
+            entries = []
+            # Validate the entire batch before adding anything; registration
+            # never clears, previews, or publishes a live waypoint plan.
+            for entry in files:
+                if not isinstance(entry, dict):
+                    raise ValueError('파일 항목이 올바르지 않습니다.')
+                name = entry.get('name')
+                if not isinstance(name, str) or not name.strip() or len(name) > 240:
+                    raise ValueError('파일 이름은 1~240자여야 합니다.')
+                waypoint_file = entry.get('waypoint_file')
+                try:
+                    validated = self._validate_waypoint_file(waypoint_file)
+                except ValueError as exception:
+                    raise ValueError(f'{name}: {exception}') from exception
+                waypoint_file = json.loads(json.dumps(waypoint_file))
+                waypoint_file['arm'] = validated['arm']
+                entries.append((name.strip(), waypoint_file))
+            ids = [self._store_waypoint_file(name, data) for name, data in entries]
+        return {'success': True, 'ids': ids,
+                'message': f'파일 {len(ids)}개를 등록했습니다. 원하는 파일을 활성화해 주세요.'}
+
+    def _preserve_current_waypoint_file(self, arm: str) -> None:
+        with self.lock:
+            active_id = self.active_waypoint_files[arm]
+            has_waypoints = self.arm_states[arm]['waypoint_count'] > 0
+        if not active_id and not has_waypoints:
+            return
+        current = self.export_waypoints(arm)
+        if active_id:
+            with self.lock:
+                self.waypoint_files[active_id]['waypoint_file'] = current
+        else:
+            self._store_waypoint_file('현재 작업 (자동 보관)', current)
+
+    def activate_waypoint_file(self, payload: dict[str, Any]) -> dict[str, Any]:
+        arm = self._select_arm(payload.get('arm'))
+        with self.waypoint_file_lock:
+            if self._execution_is_active() or self._keyboard_is_active():
+                raise RuntimeError('실행 또는 키보드 제어 중에는 파일을 전환할 수 없습니다.')
+            with self.lock:
+                file_id = str(payload.get('id', ''))
+                entry = self.waypoint_files.get(file_id)
+                if entry is None or entry['arm'] != arm:
+                    raise ValueError('해당 팔에 등록된 파일을 선택해 주세요.')
+                if self.active_waypoint_files[arm] == file_id:
+                    return {'success': True, 'message': '이미 활성화된 파일입니다.'}
+                waypoint_file = entry['waypoint_file']
+                name = entry['name']
+            self.import_waypoints(waypoint_file)
+            with self.lock:
+                self.active_waypoint_files[arm] = file_id
+                self.arm_states[arm]['plan_revision'] += 1
+        return {'success': True, 'message': f'{name} 활성화 완료. 실행 버튼으로 이동을 시작하세요.'}
+
+    def remove_waypoint_file(self, payload: dict[str, Any]) -> dict[str, Any]:
+        arm = self._select_arm(payload.get('arm'))
+        with self.waypoint_file_lock, self.lock:
+            file_id = str(payload.get('id', ''))
+            entry = self.waypoint_files.get(file_id)
+            if entry is None or entry['arm'] != arm:
+                raise ValueError('해당 팔에 등록된 파일을 선택해 주세요.')
+            if self.active_waypoint_files[arm] == file_id:
+                raise ValueError('활성 파일입니다. 다른 파일을 활성화한 뒤 목록에서 제거해 주세요.')
+            del self.waypoint_files[file_id]
+            self.arm_states[arm]['plan_revision'] += 1
+        return {'success': True, 'message': '등록 목록에서 파일을 제거했습니다.'}
+
+    def _validate_waypoint_file(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            raise ValueError('waypoint 파일은 JSON 객체여야 합니다.')
         if payload.get('schema') != 'ai_worker_waypoints/v1':
             raise ValueError('지원하지 않는 waypoint 파일 형식입니다.')
         arm = self._select_arm(payload.get('arm'))
         raw_waypoints = payload.get('waypoints')
         if not isinstance(raw_waypoints, list):
             raise ValueError('waypoint 파일의 waypoints는 목록이어야 합니다.')
-        timing = parse_joint_timing(payload.get('joint_timing'), len(raw_waypoints))
+        timing = parse_joint_timing(
+            payload.get('joint_timing'), len(raw_waypoints), self.max_uniform_tcp_speed_mps)
         refinement = parse_path_refinement(payload.get('path_refinement'))
-        if timing and refinement['enabled']:
-            raise ValueError('등속 시간 배정과 오차 검증 보간을 함께 사용할 수 없습니다.')
         parsed = []
+        flags = []
         for number, raw in enumerate(raw_waypoints, start=1):
             if not isinstance(raw, dict):
                 raise ValueError(f'Waypoint {number} 데이터가 올바르지 않습니다.')
+            flag = raw.get('is_interpolated')
+            if flag is not None and not isinstance(flag, bool):
+                raise ValueError(f'Waypoint {number}: 보간점 표시는 참 또는 거짓이어야 합니다.')
+            flags.append(flag)
             try:
                 name = parse_waypoint_name({'name': raw.get('name')})
                 positions = parse_joint_values(
@@ -2375,9 +2650,46 @@ class WaypointUiBridge(Node):
                 'speed_scale': speed_scale,
                 'mode': mode,
             })
-        if timing and (not payload.get('joint_smoothing_enabled') or
-                       any(w['mode'] != 'JOINT' for w in parsed)):
+        if timing and not refinement['enabled'] and (
+                not payload.get('joint_smoothing_enabled') or
+                any(w['mode'] != 'JOINT' for w in parsed)):
             raise ValueError('등속 시간 배정에는 모든 지점의 JOINT 연속 통과 설정이 필요합니다.')
+        flags = self._interpolated_flags(dict(
+            waypoint_count=len(parsed), waypoint_names=[w['name'] for w in parsed],
+            waypoint_interpolated=flags,
+            interpolated_provenance_version=payload.get('interpolated_provenance_version', 1)))
+        start = parse_waypoint_index({'index': payload.get('start_waypoint', 1)})
+        end = parse_waypoint_index({
+            'index': payload.get('end_waypoint', max(1, len(parsed)))})
+        if parsed and (start > len(parsed) or end > len(parsed)):
+            raise ValueError('파일의 시작·종료 waypoint 구간이 올바르지 않습니다.')
+        if 'joint_smoothing_enabled' in payload and not isinstance(
+            payload['joint_smoothing_enabled'], bool
+        ):
+            raise ValueError('연속 통과 설정은 참 또는 거짓이어야 합니다.')
+        return dict(arm=arm, parsed=parsed, flags=flags, timing=timing,
+                    refinement=refinement, start=start, end=end)
+
+    def import_waypoints(self, payload: dict[str, Any]) -> dict[str, Any]:
+        with self.waypoint_file_lock, self.execution_lock:
+            if self._execution_is_active() or self._keyboard_is_active():
+                raise RuntimeError('실행 또는 키보드 제어 중에는 waypoint 파일을 불러올 수 없습니다.')
+            validated = self._validate_waypoint_file(payload)
+            arm = validated['arm']
+            self._preserve_current_waypoint_file(arm)
+            # Applying may partially fail in the planner. Never label that partial
+            # working copy as either the previous file or the requested file.
+            with self.lock:
+                self.active_waypoint_files[arm] = None
+                self.arm_states[arm]['plan_revision'] += 1
+            return self._apply_waypoint_file(payload, validated)
+
+    def _apply_waypoint_file(
+        self, payload: dict[str, Any], validated: dict[str, Any]
+    ) -> dict[str, Any]:
+        arm, parsed, flags, timing, refinement, start, end = (
+            validated[key] for key in
+            ('arm', 'parsed', 'flags', 'timing', 'refinement', 'start', 'end'))
         if not parsed:
             self._set_joint_timing(arm, None)
             self.set_path_refinement({'arm': arm, 'path_refinement': refinement})
@@ -2386,6 +2698,7 @@ class WaypointUiBridge(Node):
                 raise RuntimeError(cleared['message'])
             with self.lock:
                 self.arm_states[arm]['waypoint_names'] = []
+                self.arm_states[arm]['waypoint_interpolated'] = []
                 self.arm_states[arm]['plan_revision'] += 1
                 self._clear_sequence_for_arm(arm)
             if 'joint_smoothing_enabled' in payload:
@@ -2397,12 +2710,6 @@ class WaypointUiBridge(Node):
                 'success': True,
                 'message': f'{arm} waypoint 목록을 파일대로 비웠습니다.',
             }
-        start = parse_waypoint_index({'index': payload.get('start_waypoint', 1)})
-        end = parse_waypoint_index({
-            'index': payload.get('end_waypoint', len(parsed))})
-        if start > len(parsed) or end > len(parsed):
-            raise ValueError('파일의 시작·종료 waypoint 구간이 올바르지 않습니다.')
-
         self._set_joint_timing(arm, None)
         self.set_path_refinement({'arm': arm, 'path_refinement': refinement})
         cleared = self._call_planner_action(arm, 'clear')
@@ -2410,6 +2717,7 @@ class WaypointUiBridge(Node):
             raise RuntimeError(cleared['message'])
         with self.lock:
             self.arm_states[arm]['waypoint_names'] = []
+            self.arm_states[arm]['waypoint_interpolated'] = []
             self.arm_states[arm]['plan_revision'] += 1
             self._clear_sequence_for_arm(arm)
         for waypoint in parsed:
@@ -2432,6 +2740,9 @@ class WaypointUiBridge(Node):
                 'enabled': payload['joint_smoothing_enabled'],
             })
         self._set_joint_timing(arm, timing)
+        with self.lock:
+            self.arm_states[arm]['waypoint_interpolated'] = flags
+            self.arm_states[arm]['plan_revision'] += 1
         return {
             'success': True,
             'message': f'{arm} waypoint {len(parsed)}개를 파일에서 적용했습니다.',
@@ -2495,6 +2806,10 @@ class WaypointUiBridge(Node):
         return was_active
 
     def start_keyboard_control(self, payload: dict[str, Any]) -> dict[str, Any]:
+        with self.execution_lock:
+            return self._start_keyboard_control_locked(payload)
+
+    def _start_keyboard_control_locked(self, payload: dict[str, Any]) -> dict[str, Any]:
         arm = self._select_arm(payload.get('arm'))
         if payload.get('confirm') != 'KEYBOARD':
             raise ValueError('키보드 WAYPOINT 제어 시작 확인이 필요합니다.')
@@ -2847,14 +3162,14 @@ class WaypointUiBridge(Node):
                     'message': 'publish_enabled=false이므로 Preview만 가능합니다.',
                 }
             return self._start_waypoint_execution(arm, slow_start=True)
+        with self.lock:
+            names_before = list(self.arm_states[arm]['waypoint_names'])
+            flags_before = self._interpolated_flags(self.arm_states[arm])
         result = self._call_planner_action(arm, action)
         if result['success'] and action in {'remove_last', 'clear'}:
             with self.lock:
-                names = self.arm_states[arm]['waypoint_names']
-                if action == 'clear':
-                    names.clear()
-                elif names:
-                    names.pop()
+                self.arm_states[arm]['waypoint_names'] = names_before[:-1] if action == 'remove_last' else []
+                self.arm_states[arm]['waypoint_interpolated'] = flags_before[:-1] if action == 'remove_last' else []
                 self.arm_states[arm]['plan_revision'] += 1
                 self._clear_sequence_for_arm(arm)
         return result
@@ -3795,6 +4110,9 @@ class ApiHandler(BaseHTTPRequestHandler):
                 '/generator.html': ('generator.html', 'text/html; charset=utf-8'),
                 '/generator.js': ('generator.js', 'text/javascript; charset=utf-8'),
                 '/generator.css': ('generator.css', 'text/css; charset=utf-8'),
+                '/curve-generator': ('curve_generator.html', 'text/html; charset=utf-8'),
+                '/curve_generator.js': ('curve_generator.js', 'text/javascript; charset=utf-8'),
+                '/curve_generator.css': ('curve_generator.css', 'text/css; charset=utf-8'),
                 '/app.js': ('app.js', 'text/javascript; charset=utf-8'),
                 '/full_robot_simulator.bundle.js': (
                     'full_robot_simulator.bundle.js',
@@ -3875,6 +4193,8 @@ class ApiHandler(BaseHTTPRequestHandler):
                 result = self.bridge.update_waypoint_speed(payload)
             elif request_path == '/api/waypoints/equal-time':
                 result = self.bridge.equalize_segment_times(payload)
+            elif request_path == '/api/waypoints/uniform-time/clear':
+                result = self.bridge.clear_joint_timing(payload)
             elif request_path == '/api/waypoints/mode':
                 result = self.bridge.update_waypoint_mode(payload)
             elif request_path == '/api/joint-smoothing':
@@ -3891,10 +4211,20 @@ class ApiHandler(BaseHTTPRequestHandler):
                 result = self.bridge.reorder_waypoint(payload)
             elif request_path == '/api/waypoints/import':
                 result = self.bridge.import_waypoints(payload)
+            elif request_path == '/api/waypoints/files/add':
+                result = self.bridge.add_waypoint_files(payload)
+            elif request_path == '/api/waypoints/files/activate':
+                result = self.bridge.activate_waypoint_file(payload)
+            elif request_path == '/api/waypoints/files/remove':
+                result = self.bridge.remove_waypoint_file(payload)
             elif request_path == '/api/generator/tool-path':
                 result = self.bridge.generate_tool_path(payload)
+            elif request_path == '/api/generator/curve-path':
+                result = self.bridge.generate_curve_path(payload)
             elif request_path == '/api/waypoints/remove':
                 result = self.bridge.remove_waypoint(payload)
+            elif request_path == '/api/waypoints/remove-range':
+                result = self.bridge.remove_waypoint_range(payload)
             elif request_path == '/api/sequence/add':
                 result = self.bridge.add_execution_step(payload)
             elif request_path == '/api/sequence/remove':

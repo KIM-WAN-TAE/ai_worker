@@ -15,7 +15,11 @@ const state = {
   refinementDrafts: { left: null, right: null },
   refinementApplied: { left: null, right: null },
   refinementBusy: false,
+  refinementErrors: { left: '', right: '' },
   waypointListCollapsed: false,
+  hideInterpolated: false,
+  deleteRange: { left: null, right: null },
+  deleteRangeBusy: false,
   relativeReferences: { left: 'last', right: 'last' },
   frameRelativeReferences: { left: 'last', right: 'last' },
   selectedWaypoints: { left: null, right: null },
@@ -24,6 +28,8 @@ const state = {
   lastTrajectoryKey: { left: '', right: '' },
   renderedTrajectoryArm: null,
   busy: false,
+  waypointFileBusy: false,
+  renderedWaypointFilesKey: '',
   refreshRequestId: 0,
   runtimeRefreshInFlight: false,
   planRefreshPending: false,
@@ -149,9 +155,26 @@ function shortJoint(name) {
   return match ? `Joint ${match[1]}` : name;
 }
 
+function currentJointRadians(data) {
+  if (!data?.joint_state_fresh || data.joint_names?.length !== 8) return null;
+  const joints = data.robot_joint_state;
+  if (!Array.isArray(joints?.name) || !Array.isArray(joints?.position)) return null;
+  const positions = new Map(joints.name.map((name, index) => [name, joints.position[index]]));
+  const values = data.joint_names.map((name) => positions.get(name));
+  return values.every(Number.isFinite) ? values : null;
+}
+
+function selectedRangeWaypoints(data) {
+  const points = data.waypoints || [];
+  const start = data.start_waypoint || 1;
+  const end = data.end_waypoint || data.waypoint_count || points.length;
+  return points.filter((point, i) => (point.index ?? i+1) >= Math.min(start, end)
+    && (point.index ?? i+1) <= Math.max(start, end));
+}
+
 function waypointPlanMode(data) {
   if (data.path_refinement?.enabled) return 'JOINT_REFINED';
-  const modes = new Set((data.waypoints || []).map(
+  const modes = new Set(selectedRangeWaypoints(data).map(
     (waypoint) => waypoint.interpolation_mode || data.path_mode,
   ));
   const mode = modes.size === 0
@@ -316,11 +339,13 @@ function formatPose(position, rpy) {
   return `XYZ ${millimeters.map((value) => value.toFixed(1)).join(', ')} mm · RPY ${degrees.map((value) => value.toFixed(1)).join(', ')}°`;
 }
 
-function relativeReferenceOptions(data) {
+function relativeReferenceOptions(data, selectedReference) {
+  const points = (data.waypoints || []).filter((point) =>
+    !state.hideInterpolated || !isInterpolatedWaypoint(point, data) || point.index === Number(selectedReference));
   return [
     `<option value="last">${data.waypoint_count > 0 ? `마지막 waypoint · ${data.waypoint_count}` : '마지막 waypoint · 현재 자세'}</option>`,
     '<option value="current">현재 실제 자세</option>',
-    ...data.waypoints.map((waypoint) => `<option value="${waypoint.index}">${escapeHtml(waypoint.name || `Waypoint ${waypoint.index}`)}</option>`),
+    ...points.map((waypoint) => `<option value="${waypoint.index}">${escapeHtml(waypoint.name || `Waypoint ${waypoint.index}`)}</option>`),
   ].join('');
 }
 
@@ -422,7 +447,95 @@ function renderPoseEditor(data) {
   syncPoseEditorViewer(data);
 }
 
+function isInterpolatedWaypoint(waypoint, data) {
+  const legacy = /^(왼팔|오른팔|왼손|오른손)\s*지점\s*\d+\s*-\s*(직선|곡선)?보간\s*\d+(\s*\(\s*\d+\s*(→|->)\s*\d+\s*\))?$/;
+  const oldGenerated = legacy.test(waypoint.name || '');
+  if (oldGenerated && (data?.interpolated_provenance_version || 1) < 2) return true;
+  return typeof waypoint.is_interpolated === 'boolean' ? waypoint.is_interpolated
+    : oldGenerated || /^구간 \d+ (곡선|직선) 중간점 \d+$/.test(waypoint.name || '');
+}
+
+function visibleWaypoints(data) {
+  return (data?.waypoints || []).filter((waypoint) => !state.hideInterpolated || !isInterpolatedWaypoint(waypoint, data));
+}
+
+function renderExecutionRangeControls(data) {
+  for (const [id, index] of [['startWaypointSelect', data.start_waypoint || 1],
+    ['endWaypointSelect', data.end_waypoint || data.waypoint_count || 1]]) {
+    const select = byId(id);
+    // Filtering is a view change. Keep a committed hidden endpoint selectable
+    // until the user explicitly changes it, without sending a robot request.
+    const candidates = (data.waypoints || []).filter((point) =>
+      !state.hideInterpolated || !isInterpolatedWaypoint(point, data) || point.index === index);
+    setWaypointOptions(select, waypointOptions(candidates) || '<option value="1">Waypoint가 없습니다</option>');
+    select.value = String(index);
+    select.disabled = !data.waypoints?.length || Boolean(data.execution?.active);
+  }
+}
+
+function waypointOptions(waypoints) {
+  return waypoints.map((waypoint) => `<option value="${waypoint.index}">#${waypoint.index} · ${escapeHtml(waypoint.name || `Waypoint ${waypoint.index}`)}</option>`).join('');
+}
+
+function keepWaypointOption(select, waypoints, previous, fallback) {
+  select.value = String(waypoints.some((point) => point.index === previous) ? previous : fallback);
+}
+
+function setWaypointOptions(select, options) {
+  if (select.dataset.waypointOptions === options) return;
+  select.innerHTML = options;
+  select.dataset.waypointOptions = options;
+}
+
+function renderDeleteRange(data) {
+  const locked = Boolean(data.execution?.active || data.keyboard_control?.active || state.deleteRangeBusy);
+  let selection = state.deleteRange[data.arm];
+  const key = JSON.stringify((data.waypoints || []).map((point) => [point.name, point.joint_rad, point.position_m]));
+  if (selection && (selection.key !== key || data.execution?.active || data.keyboard_control?.active)) {
+    state.deleteRange[data.arm] = null;
+    selection = null;
+  }
+  for (const id of ['deleteRange', 'deleteRangeList']) {
+    byId(id).disabled = locked || !data.waypoints?.length;
+    byId(id).setAttribute('aria-pressed', String(Boolean(selection)));
+  }
+  byId('deleteRangePanel').hidden = !selection;
+  byId('waypointList').classList.toggle('range-delete-mode', Boolean(selection));
+  if (!selection) return;
+  const points = visibleWaypoints(data);
+  for (const [id, field] of [['deleteRangeStart', 'start'], ['deleteRangeEnd', 'end']]) {
+    const select = byId(id);
+    // Preserve an endpoint selected before enabling the display filter.
+    const candidates = data.waypoints.filter((point) => points.includes(point) || point.index === selection[field]);
+    setWaypointOptions(select, waypointOptions(candidates));
+    select.value = String(selection[field]);
+    select.disabled = locked;
+  }
+  const [start, end] = [selection.start, selection.end].sort((a, b) => a - b);
+  const count = end - start + 1;
+  byId('deleteRangeSummary').textContent = `#${start}–#${end} · ${count}개 삭제 (양 끝점 포함)`;
+  byId('confirmDeleteRange').textContent = `${count}개 지점 삭제`;
+  byId('confirmDeleteRange').disabled = locked;
+  byId('cancelDeleteRange').disabled = state.deleteRangeBusy;
+}
+
+function toggleDeleteRange() {
+  const data = state.data;
+  if (!data || data.execution?.active || data.keyboard_control?.active || state.deleteRangeBusy) return;
+  if (state.deleteRange[data.arm]) state.deleteRange[data.arm] = null;
+  else {
+    const first = visibleWaypoints(data)[0]?.index;
+    if (!first) return;
+    state.deleteRange[data.arm] = { start: first, end: first, awaitingEnd: false,
+      key: JSON.stringify(data.waypoints.map((point) => [point.name, point.joint_rad, point.position_m])) };
+    if (state.waypointListCollapsed) byId('toggleWaypointList').click();
+  }
+  renderPosePanels(data);
+  if (state.deleteRange[data.arm]) byId('deleteRangePanel').scrollIntoView?.({ block: 'center', behavior: 'smooth' });
+}
+
 function renderPosePanels(data) {
+  renderDeleteRange(data);
   const model = state.simulator.models[data.arm];
   byId('gripperFrameName').textContent = model?.tip_link || '—';
   byId('absoluteFrameName').textContent = data.world_frame || 'world';
@@ -433,7 +546,7 @@ function renderPosePanels(data) {
   if (/^\d+$/.test(selectedReference) && Number(selectedReference) > data.waypoint_count) {
     state.relativeReferences[data.arm] = 'last';
   }
-  referenceSelect.innerHTML = relativeReferenceOptions(data);
+  setWaypointOptions(referenceSelect, relativeReferenceOptions(data, selectedReference));
   referenceSelect.value = state.relativeReferences[data.arm];
 
   const frameReferenceSelect = byId('frameRelativeReferenceSelect');
@@ -442,7 +555,7 @@ function renderPosePanels(data) {
     && Number(frameSelectedReference) > data.waypoint_count) {
     state.frameRelativeReferences[data.arm] = 'last';
   }
-  frameReferenceSelect.innerHTML = relativeReferenceOptions(data);
+  setWaypointOptions(frameReferenceSelect, relativeReferenceOptions(data, frameSelectedReference));
   frameReferenceSelect.value = state.frameRelativeReferences[data.arm];
   const worldReference = selectedWorldReferencePose(
     data, state.frameRelativeReferences[data.arm],
@@ -470,6 +583,10 @@ function renderPosePanels(data) {
     pathMode: data.path_mode,
     executing: Boolean(data.execution?.active),
     selectedWaypoint: state.selectedWaypoints[data.arm],
+    hideInterpolated: state.hideInterpolated,
+    provenanceVersion: data.interpolated_provenance_version,
+    deleteRange: state.deleteRange[data.arm],
+    deleteRangeBusy: state.deleteRangeBusy,
     baseLink: model?.base_link || '',
     waypoints: data.waypoints || [],
   });
@@ -482,7 +599,12 @@ function renderPosePanels(data) {
     list.innerHTML = '<div class="waypoint-list-empty">관절 목표, 전역 고정 frame 상대 목표, 그리퍼 상대 목표를 여러 개 추가할 수 있습니다.</div>';
     return;
   }
-  list.innerHTML = data.waypoints.map((waypoint) => {
+  const displayed = visibleWaypoints(data);
+  if (!displayed.length) {
+    list.innerHTML = '<div class="waypoint-list-empty">표시할 원본 지점이 없습니다. 보간점 제외 보기를 해제해 주세요.</div>';
+    return;
+  }
+  list.innerHTML = displayed.map((waypoint) => {
     const displayPose = waypoint.world_pose || waypoint;
     const displayFrame = waypoint.world_pose
       ? (data.world_frame || 'world')
@@ -502,8 +624,11 @@ function renderPosePanels(data) {
       ? '—'
       : `${Number(waypoint.gripper_rad).toFixed(4)} rad (${Number(waypoint.gripper_deg).toFixed(2)}°)`;
     const interpolationMode = waypoint.interpolation_mode || data.path_mode || 'LINEAR';
+    const selection = state.deleteRange[data.arm];
+    const inRange = selection && waypoint.index >= Math.min(selection.start, selection.end)
+      && waypoint.index <= Math.max(selection.start, selection.end);
     return `
-      <article class="waypoint-item${state.selectedWaypoints[data.arm] === waypoint.index ? ' selected' : ''}" data-index="${waypoint.index}" draggable="${!data.execution?.active}">
+      <article class="waypoint-item${state.selectedWaypoints[data.arm] === waypoint.index ? ' selected' : ''}${inRange ? ' delete-selected' : ''}" data-index="${waypoint.index}" draggable="${!data.execution?.active && !selection && !state.deleteRangeBusy}">
         <header><span class="drag-handle" title="드래그해 순서 변경">☰</span><strong>${escapeHtml(waypoint.name || `Waypoint ${waypoint.index}`)}</strong><span>#${waypoint.index} · ${displayFrame} 절대 자세</span></header>
         <p>XYZ · ${positionMm.map((value) => value.toFixed(1)).join(', ')} mm</p>
         <p>RPY · ${rpyDeg.map((value) => value.toFixed(1)).join(', ')}°</p>
@@ -533,6 +658,7 @@ function renderExecutionSequence(data) {
   const sequence = data.execution_sequence || [];
   const container = byId('executionSequence');
   const sequenceRunDisabled = !data.publish_enabled
+    || state.waypointFileBusy
     || Boolean(data.execution?.active)
     || Boolean(data.keyboard_control?.active)
     || !byId('executeConsent').checked;
@@ -551,24 +677,23 @@ function renderExecutionSequence(data) {
 
   const arm = byId('sequenceArm').value;
   const armData = state.armData[arm];
-  const waypoints = armData?.waypoints || [];
+  const waypoints = visibleWaypoints(armData);
   const start = byId('sequenceStart');
   const end = byId('sequenceEnd');
   const previousStart = Number(start.value) || 1;
-  const previousEnd = Number(end.value) || waypoints.length;
-  const options = waypoints.map((waypoint) => (
-    `<option value="${waypoint.index}">${escapeHtml(waypoint.name || `Waypoint ${waypoint.index}`)}</option>`
-  )).join('');
-  start.innerHTML = options || '<option>Waypoint 없음</option>';
-  end.innerHTML = options || '<option>Waypoint 없음</option>';
-  start.value = String(Math.min(previousStart, waypoints.length || 1));
-  end.value = String(Math.min(previousEnd, waypoints.length || 1));
+  const previousEnd = Number(end.value) || waypoints.at(-1)?.index;
+  const options = waypointOptions(waypoints);
+  setWaypointOptions(start, options || '<option>Waypoint 없음</option>');
+  setWaypointOptions(end, options || '<option>Waypoint 없음</option>');
+  keepWaypointOption(start, waypoints, previousStart, waypoints[0]?.index || '');
+  keepWaypointOption(end, waypoints, previousEnd, waypoints.at(-1)?.index || '');
   const disabled = !waypoints.length || Boolean(data.execution?.active);
   start.disabled = disabled;
   end.disabled = disabled;
   byId('addSequenceStep').disabled = disabled;
   byId('clearSequence').disabled = !sequence.length || Boolean(data.execution?.active);
   byId('executeSequence').disabled = !data.publish_enabled || !sequence.length
+    || state.waypointFileBusy
     || Boolean(data.execution?.active) || Boolean(data.keyboard_control?.active)
     || !byId('executeConsent').checked;
 }
@@ -928,6 +1053,7 @@ function buildJointRows(data) {
 
 function renderJointValues(data) {
   if (!data) return;
+  byId('copyCurrentPose').disabled = currentJointRadians(data) === null;
   data.current_deg.forEach((value, index) => {
     const current = byId(`current-${index}`);
     const delta = byId(`delta-${index}`);
@@ -956,6 +1082,7 @@ function setTargets(values) {
 
 function renderState(data) {
   state.data = data;
+  renderWaypointFiles();
   buildJointRows(data);
   renderJointValues(data);
   const armLabel = data.arm === 'left' ? '왼팔' : '오른팔';
@@ -984,21 +1111,7 @@ function renderState(data) {
   byId('executionFailure').textContent = failure
     ? `${new Date(failure.time_unix_s * 1000).toLocaleTimeString()} · ${failure.status}`
     : '';
-  const startSelect = byId('startWaypointSelect');
-  const rangeOptions = data.waypoints.map((waypoint) => (
-    `<option value="${waypoint.index}">${escapeHtml(waypoint.name || `Waypoint ${waypoint.index}`)}</option>`
-  )).join('');
-  startSelect.innerHTML = data.waypoints.length
-    ? rangeOptions
-    : '<option value="1">Waypoint가 없습니다</option>';
-  startSelect.value = String(data.start_waypoint || 1);
-  startSelect.disabled = data.waypoints.length === 0 || Boolean(data.execution?.active);
-  const endSelect = byId('endWaypointSelect');
-  endSelect.innerHTML = data.waypoints.length
-    ? rangeOptions
-    : '<option value="1">Waypoint가 없습니다</option>';
-  endSelect.value = String(data.end_waypoint || data.waypoint_count || 1);
-  endSelect.disabled = data.waypoints.length === 0 || Boolean(data.execution?.active);
+  renderExecutionRangeControls(data);
   byId('nextDwell').max = data.max_waypoint_dwell_s;
   byId('nextSpeed').max = data.max_waypoint_speed_scale || 3;
   if (document.activeElement !== byId('nextDwell')) {
@@ -1073,12 +1186,22 @@ function renderState(data) {
   });
   byId('jointSmoothing').checked = Boolean(data.joint_smoothing_enabled);
   byId('jointSmoothing').disabled = Boolean(data.execution?.active) || Boolean(data.path_refinement?.enabled);
+  const selectedPoints = selectedRangeWaypoints(data);
+  const selectedAreJoint = selectedPoints.length > 0 && selectedPoints.every(
+    (point) => (point.interpolation_mode || data.path_mode) === 'JOINT');
+  byId('jointSmoothingHint').textContent = data.path_refinement?.enabled
+    ? '부드럽게 연결에서 오차를 검증한 JOINT 곡선을 사용 중입니다. 원본 지점의 보간 방식은 기준 경로입니다.'
+    : !selectedPoints.length ? '기본으로 켜져 있으며, 선택 구간이 모두 JOINT이면 자동 적용됩니다.'
+      : !selectedAreJoint ? '선택 구간에 Cartesian/LINEAR 기준 지점이 있어 일반 보간을 사용합니다.'
+        : data.joint_smoothing_enabled ? '선택 구간이 모두 JOINT이므로 연속 통과를 자동 적용합니다. 대기시간이 있는 지점에서는 정지합니다.'
+          : 'JOINT 연속 통과가 수동으로 꺼져 있습니다. 켜면 중간 지점을 이어갑니다.';
   renderRefinementControls(data);
   const timing = data.joint_timing;
   renderEqualTimeControls(data);
-  byId('jointTimingInfo').hidden = !timing || waypointPlanMode(data) !== 'JOINT_CONTINUOUS';
+  byId('jointTimingInfo').hidden = !timing || !['JOINT_CONTINUOUS', 'JOINT_REFINED'].includes(waypointPlanMode(data));
   byId('jointTimingInfo').textContent = timing
-    ? `일반 이동 ${(timing.speed_mps * 1000).toFixed(1)} mm/s 기준 · 출발·정지와 관절 제약에 따라 감속 · 삽입 ${timing.preserve_start_waypoint}–${timing.preserve_end_waypoint}번의 기존 시간 유지`
+    ? `끝단 이동 ${(timing.speed_mps * 1000).toFixed(1)} mm/s 기준 · 출발·정지와 관절 제약에 따라 감속${timing.preserve_start_waypoint
+      ? ` · ${timing.preserve_start_waypoint}–${timing.preserve_end_waypoint}번의 기존 시간 유지` : ''}`
     : '';
 
   renderPosePanels(data);
@@ -1101,9 +1224,9 @@ function renderState(data) {
         : ' WAYPOINT 제어권으로 양팔 command가 기록·전송됨을 확인했습니다.';
     }
     byId('execute').disabled = Boolean(data.execution?.active)
-      || keyboardActive || !consent || !consent.checked;
+      || keyboardActive || state.waypointFileBusy || !consent || !consent.checked;
     byId('executeSlowStart').disabled = Boolean(data.execution?.active)
-      || keyboardActive || !consent || !consent.checked;
+      || keyboardActive || state.waypointFileBusy || !consent || !consent.checked;
   }
   renderExecutionSequence(data);
   renderTrajectory(data.trajectory);
@@ -1345,6 +1468,21 @@ byId('copyCurrent').addEventListener('click', () => {
   }
   setTargets(state.data.current_deg);
 });
+byId('copyCurrentPose').addEventListener('click', async () => {
+  const arm = state.activeArm;
+  const data = state.armData[arm] || (state.data?.arm === arm ? state.data : null);
+  const values = currentJointRadians(data);
+  if (!values) {
+    showToast('선택한 팔의 최신 8축 joint state를 먼저 받아야 합니다.', true);
+    return;
+  }
+  try {
+    await copyText(`[${values.map((value) => value.toFixed(7)).join(', ')}]`);
+    showToast(`${arm === 'left' ? '왼팔' : '오른팔'} 현재 자세의 8축 radian 리스트를 복사했습니다.`);
+  } catch (error) {
+    showToast(error.message, true);
+  }
+});
 byId('nextDwell').addEventListener('input', (event) => {
   state.nextDwells[state.activeArm] = event.target.value;
 });
@@ -1465,34 +1603,172 @@ byId('removeLast').addEventListener('click', () => runAction('remove_last').catc
 byId('clearAll').addEventListener('click', () => runAction('clear').catch(() => {}));
 byId('removeLastList').addEventListener('click', () => runAction('remove_last').catch(() => {}));
 byId('clearAllList').addEventListener('click', () => runAction('clear').catch(() => {}));
-byId('saveWaypointFile').addEventListener('click', async () => {
+byId('deleteRange').addEventListener('click', toggleDeleteRange);
+byId('deleteRangeList').addEventListener('click', toggleDeleteRange);
+byId('cancelDeleteRange').addEventListener('click', () => {
+  if (state.deleteRangeBusy) return;
+  state.deleteRange[state.activeArm] = null;
+  renderPosePanels(state.data);
+});
+for (const [id, field] of [['deleteRangeStart', 'start'], ['deleteRangeEnd', 'end']]) {
+  byId(id).addEventListener('change', (event) => {
+    const selection = state.deleteRange[state.activeArm];
+    if (!selection || state.deleteRangeBusy) return;
+    selection[field] = Number(event.target.value);
+    selection.awaitingEnd = false;
+    renderPosePanels(state.data);
+  });
+}
+byId('confirmDeleteRange').addEventListener('click', async () => {
+  const arm = state.activeArm, selection = state.deleteRange[arm], data = state.armData[arm];
+  if (!selection || !data || state.deleteRangeBusy || data.execution?.active || data.keyboard_control?.active) return;
+  const [start, end] = [selection.start, selection.end].sort((a, b) => a - b);
+  if (!window.confirm(`#${start}부터 #${end}까지 ${end - start + 1}개 지점을 삭제하시겠습니까? 숨겨진 보간점도 포함됩니다.`)) return;
+  state.deleteRangeBusy = true;
+  renderPosePanels(data);
   try {
-    const data = await request(`/api/waypoints/export?arm=${state.activeArm}`);
+    const result = await request('/api/waypoints/remove-range', { method: 'POST', body: JSON.stringify({
+      arm, start_index: start, end_index: end, expected_count: data.waypoints.length,
+    }) });
+    showToast(result.message);
+    state.selectedWaypoints[arm] = null;
+    state.dwellDrafts[arm] = {};
+    state.speedDrafts[arm] = {};
+  } catch (error) { showToast(error.message, true); }
+  finally {
+    state.deleteRangeBusy = false;
+    state.deleteRange[arm] = null;
+    state.renderedWaypointListKey = '';
+    await refresh();
+  }
+});
+for (const id of ['hideInterpolatedList', 'hideInterpolatedSequence']) {
+  byId(id).addEventListener('change', (event) => {
+    state.hideInterpolated = event.target.checked;
+    byId('hideInterpolatedList').checked = state.hideInterpolated;
+    byId('hideInterpolatedSequence').checked = state.hideInterpolated;
+    if (!state.data) return;
+    renderExecutionRangeControls(state.data);
+    renderPosePanels(state.data);
+    renderExecutionSequence(state.data);
+  });
+}
+byId('saveWaypointFile').addEventListener('click', async () => {
+  const arm = state.activeArm;
+  const defaultName = `${arm}_waypoints.json`;
+  const enteredName = window.prompt('저장할 파일 이름을 입력하세요. (.json 자동 추가)', defaultName);
+  if (enteredName === null) return;
+  const name = enteredName.trim() || defaultName;
+  const filename = /\.json$/i.test(name) ? name : `${name}.json`;
+  try {
+    if (/[<>:"/\\|?*\u0000-\u001f]/.test(filename)) {
+      throw new Error('파일 이름에는 경로 구분자나 < > : " | ? * 문자를 사용할 수 없습니다.');
+    }
+    const data = await request(`/api/waypoints/export?arm=${arm}`);
     const blob = new Blob([`${JSON.stringify(data, null, 2)}\n`], { type: 'application/json' });
     const link = document.createElement('a');
     link.href = URL.createObjectURL(blob);
-    link.download = `${state.activeArm}_waypoints.json`;
+    link.download = filename;
     link.click();
     URL.revokeObjectURL(link.href);
-    showToast(`${state.activeArm === 'left' ? '왼팔' : '오른팔'} waypoint 파일을 저장했습니다.`);
+    showToast(`${arm === 'left' ? '왼팔' : '오른팔'} waypoint를 ${filename} 파일로 저장했습니다.`);
   } catch (error) { showToast(error.message, true); }
 });
+function renderWaypointFiles() {
+  const arms = state.availableArms;
+  const running = arms.some((arm) => state.armData[arm]?.execution?.active
+    || state.armData[arm]?.keyboard_control?.active);
+  const locked = state.waypointFileBusy || running;
+  byId('loadWaypointFile').disabled = state.waypointFileBusy || !state.data;
+  const library = arms.map((arm) => ({ arm, files: state.armData[arm]?.waypoint_files || [] }));
+  const key = JSON.stringify([library, locked]);
+  if (state.renderedWaypointFilesKey === key) return;
+  state.renderedWaypointFilesKey = key;
+  byId('waypointFileLibrary').innerHTML = library.map(({ arm, files }) => {
+    const active = files.find((file) => file.active);
+    return `<div class="waypoint-file-arm" data-arm="${arm}">
+      <h3>${arm === 'left' ? '왼팔' : '오른팔'} · ${files.length}개 등록</h3>
+      <div class="waypoint-file-status">${active
+        ? `활성 파일: ${escapeHtml(active.name)}`
+        : '활성 파일 없음 · 현재 waypoint 작업 유지 중'}</div>
+      ${files.length ? files.map((file) => `<div class="waypoint-file-row${file.active ? ' active' : ''}">
+        <div class="waypoint-file-info"><strong>${escapeHtml(file.name)}</strong>
+          <small>${file.waypoint_count} waypoint${file.active ? ' · 활성 · 현재 편집 대상' : ' · 보관 중'}</small></div>
+        <button class="button secondary" data-file-action="activate" data-file-id="${escapeHtml(file.id)}" data-arm="${arm}"
+          ${locked || file.active ? 'disabled' : ''}>${file.active ? '활성' : '활성화'}</button>
+        <button class="button ghost" data-file-action="remove" data-file-id="${escapeHtml(file.id)}" data-arm="${arm}"
+          aria-label="${escapeHtml(file.name)} 등록 해제" ${locked || file.active ? 'disabled' : ''}>제거</button>
+      </div>`).join('') : '<p class="waypoint-file-empty">실행 파일 추가에서 JSON 파일을 선택하세요.</p>'}
+    </div>`;
+  }).join('');
+}
+
+function resetWaypointFileDrafts(arm) {
+  state.dwellDrafts[arm] = {};
+  state.speedDrafts[arm] = {};
+  state.deleteRange[arm] = null;
+  state.selectedWaypoints[arm] = null;
+  state.equalTimes[arm] = { mode: 'total', seconds: '', excluded: null, result: null };
+  state.refinementDrafts[arm] = null;
+  state.refinementApplied[arm] = null;
+  state.refinementErrors[arm] = '';
+  state.simulator.poseDrafts[arm] = null;
+  state.simulator.playing = false;
+  state.simulator.playbackArms = [];
+  state.simulator.previewPoseActive = false;
+  state.simulator.playhead = 0;
+  state.lastTrajectoryKey[arm] = '';
+  state.renderedWaypointListKey = '';
+}
+
 byId('loadWaypointFile').addEventListener('click', () => byId('waypointFileInput').click());
 byId('waypointFileInput').addEventListener('change', async (event) => {
-  const [file] = event.target.files;
+  const files = Array.from(event.target.files || []);
   event.target.value = '';
-  if (!file) return;
+  if (!files.length || state.busy) return;
+  state.busy = true;
+  state.waypointFileBusy = true;
+  renderWaypointFiles();
   try {
-    const payload = JSON.parse(await file.text());
-    if (!window.confirm('파일의 waypoint로 해당 팔의 현재 목록을 교체하시겠습니까?')) return;
-    const result = await request('/api/waypoints/import', {
-      method: 'POST', body: JSON.stringify(payload),
+    const entries = await Promise.all(files.map(async (file) => {
+      try { return { name: file.name, waypoint_file: JSON.parse(await file.text()) }; }
+      catch (error) { throw new Error(`${file.name}: ${error.message}`); }
+    }));
+    const result = await request('/api/waypoints/files/add', {
+      method: 'POST', body: JSON.stringify({ files: entries }),
     });
-    if (state.availableArms.includes(payload.arm)) state.activeArm = payload.arm;
-    state.renderedWaypointListKey = '';
     showToast(result.message);
     await refresh();
-  } catch (error) { showToast(`파일 불러오기 실패 · ${error.message}`, true); }
+  } catch (error) { showToast(`파일 등록 실패 · ${error.message}`, true); }
+  finally {
+    state.busy = false;
+    state.waypointFileBusy = false;
+    renderWaypointFiles();
+  }
+});
+byId('waypointFileLibrary').addEventListener('click', async (event) => {
+  const button = event.target.closest('button[data-file-action]');
+  if (!button || button.disabled || state.busy) return;
+  const { fileAction, fileId, arm } = button.dataset;
+  const activating = fileAction === 'activate';
+  state.busy = true;
+  state.waypointFileBusy = true;
+  renderWaypointFiles();
+  try {
+    const result = await request(`/api/waypoints/files/${fileAction}`, {
+      method: 'POST', body: JSON.stringify({ arm, id: fileId }),
+    });
+    if (activating) state.activeArm = arm;
+    showToast(result.message);
+  } catch (error) { showToast(`파일 ${activating ? '활성화' : '제거'} 실패 · ${error.message}`, true); }
+  finally {
+    // Even a failed planner import may have partially changed the live plan.
+    if (activating) resetWaypointFileDrafts(arm);
+    state.busy = false;
+    state.waypointFileBusy = false;
+    await refresh();
+    renderWaypointFiles();
+  }
 });
 byId('waypointList').addEventListener('input', (event) => {
   const index = Number(event.target.dataset.index);
@@ -1524,6 +1800,15 @@ byId('waypointList').addEventListener('click', async (event) => {
   const item = event.target.closest('.waypoint-item');
   const index = Number(event.target.dataset.index || item?.dataset.index);
   if (!Number.isInteger(index) || index < 1) return;
+  if (state.deleteRangeBusy) return;
+  const selection = state.deleteRange[state.activeArm];
+  if (selection) {
+    if (state.data?.execution?.active || state.data?.keyboard_control?.active) return;
+    if (selection.awaitingEnd) { selection.end = index; selection.awaitingEnd = false; }
+    else { selection.start = index; selection.end = index; selection.awaitingEnd = true; }
+    renderPosePanels(state.data);
+    return;
+  }
   if (event.target.classList.contains('save-name')) {
     const input = byId('waypointList').querySelector(`.name-input[data-index="${index}"]`);
     try {
@@ -1608,7 +1893,7 @@ byId('waypointList').addEventListener('click', async (event) => {
 });
 byId('waypointList').addEventListener('dragstart', (event) => {
   const item = event.target.closest('.waypoint-item');
-  if (!item || state.data?.execution?.active) return;
+  if (!item || state.data?.execution?.active || state.deleteRange[state.activeArm] || state.deleteRangeBusy) return;
   state.draggedWaypoint = Number(item.dataset.index);
   item.classList.add('dragging');
   event.dataTransfer.effectAllowed = 'move';
@@ -2012,12 +2297,13 @@ function renderEqualTimeControls(data) {
   byId('equalTimePanel').hidden = !data.equal_segment_time_supported || !data.equal_total_time_supported;
   const draft = state.equalTimes[data.arm];
   const totalMode = draft.mode === 'total';
+  const needsCombinedUpgrade = totalMode && data.path_refinement?.enabled && !data.uniform_refinement_supported;
   byId('equalTimeMode').value = draft.mode;
   byId('equalTimeSecondsLabel').textContent = totalMode ? '전체 목표시간 (초)' : '구간당 시간 (초)';
   byId('equalTimeSeconds').placeholder = totalMode ? '예: 180' : '비우면 자동 계산';
   byId('equalTimeAll').textContent = totalMode ? '전체 목표시간 적용' : '모든 구간 이동시간 동일';
   if (draft.excluded === null && data.waypoints?.length) {
-    draft.excluded = data.joint_timing
+    draft.excluded = data.joint_timing?.preserve_start_waypoint
       ? `${data.joint_timing.preserve_start_waypoint}-${data.joint_timing.preserve_end_waypoint}` : '';
   }
   if (document.activeElement !== byId('equalTimeSeconds')) byId('equalTimeSeconds').value = draft.seconds;
@@ -2028,10 +2314,17 @@ function renderEqualTimeControls(data) {
   ['equalTimeAll', 'equalTimeExcept', 'equalTimeSeconds', 'equalTimeExcluded', 'equalTimeMode'].forEach((id) => {
     byId(id).disabled = disabled;
   });
+  if (totalMode && (!data.uniform_total_time_supported || needsCombinedUpgrade)) {
+    byId('equalTimeAll').disabled = true;
+    byId('equalTimeExcept').disabled = true;
+  }
+  byId('clearUniformTime').disabled = disabled || !data.joint_timing || !data.uniform_total_time_supported;
   const result = byId('equalTimeResult');
   const outdated = draft.result?.fingerprint
     && draft.result.fingerprint !== equalTimeFingerprint(data);
   result.textContent = state.equalTimeBusy ? '시간 계산 및 궤적 검증 중…'
+    : needsCombinedUpgrade ? '부드럽게 연결과 목표시간을 함께 쓰려면 waypoint UI와 양팔 노드를 새 버전으로 재시작해 주세요.'
+    : totalMode && !data.uniform_total_time_supported ? '끝단 등속 배정을 사용하려면 waypoint UI와 양팔 노드를 새 버전으로 재시작해 주세요.'
     : outdated ? '경로 또는 속도 설정이 변경되었습니다. 다시 적용해 검증해 주세요.'
       : draft.result?.message || '시간 배정 후 검증 결과가 여기에 표시됩니다.';
   result.classList.toggle('error', Boolean(draft.result?.error) || Boolean(outdated));
@@ -2069,6 +2362,7 @@ async function equalizeWaypointTimes(excludeSelected) {
     renderEqualTimeControls(state.data);
     const result = await request('/api/waypoints/equal-time', {
       method: 'POST', body: JSON.stringify({ arm, excluded_waypoints: excluded,
+        ...(draft.mode === 'total' ? { distribution: 'uniform' } : {}),
         [draft.mode === 'total' ? 'total_duration_s' : 'duration_s']: seconds }),
     });
     state.speedDrafts[arm] = {};
@@ -2102,6 +2396,24 @@ byId('equalTimeExcluded').addEventListener('input', (event) => {
 });
 byId('equalTimeAll').addEventListener('click', () => equalizeWaypointTimes(false));
 byId('equalTimeExcept').addEventListener('click', () => equalizeWaypointTimes(true));
+byId('clearUniformTime').addEventListener('click', async () => {
+  if (state.equalTimeBusy || !state.data?.joint_timing) return;
+  const arm = state.activeArm;
+  state.equalTimeBusy = true;
+  renderEqualTimeControls(state.data);
+  try {
+    const result = await request('/api/waypoints/uniform-time/clear', {
+      method: 'POST', body: JSON.stringify({ arm }),
+    });
+    state.equalTimes[arm].result = null;
+    showToast(result.message);
+    await refresh();
+  } catch (error) { showToast(error.message, true); }
+  finally {
+    state.equalTimeBusy = false;
+    renderEqualTimeControls(state.data);
+  }
+});
 
 byId('toggleWaypointList').addEventListener('click', () => {
   state.waypointListCollapsed = !state.waypointListCollapsed;
@@ -2117,6 +2429,7 @@ byId('toggleWaypointList').addEventListener('click', () => {
 
 const refinementFields = {
   enabled: 'refinementEnabled', subdivisions: 'refinementSubdivisions',
+  automatic_subdivisions: 'refinementAutomatic',
   smoothing_percent: 'refinementStrength', position_tolerance_mm: 'refinementPosition',
   orientation_tolerance_deg: 'refinementOrientation', joint_tolerance_rad: 'refinementJoint',
   max_refinements: 'refinementRetries',
@@ -2127,12 +2440,14 @@ function updateRefinementStrength(value) {
   if (document.activeElement !== byId('refinementStrengthNumber')) {
     byId('refinementStrengthNumber').value = value;
   }
+  byId('refinementConnectionHint').textContent = Number(value) === 100
+    ? '저장한 지점을 지나며 최대한 이어갑니다. 대기시간이 있는 지점에서는 정지합니다.'
+    : Number(value) === 0
+      ? '저장한 지점마다 정지하도록 설정되어 있습니다. 고급 설정에서 연결 강도를 바꿀 수 있습니다.'
+      : `연결 강도 ${value}%로 설정되어 있습니다. 고급 설정에서 바꿀 수 있으며, 대기시간이 있는 지점에서는 정지합니다.`;
   byId('refinementStrengthHelp').textContent = Number(value) === 0
-    ? '0%: 원본 waypoint에서 정지합니다. 생성된 중간점에서는 불필요하게 정지하지 않습니다.'
-    : `${value}%: ${value <= 30 ? '통과 속도를 조금 이어 줍니다.' : value <= 70 ? '통과 속도를 적당히 이어 줍니다.' : '통과 속도를 크게 이어 줍니다.'} 숫자가 클수록 중간 정지가 줄어듭니다.`;
-  document.querySelectorAll('[data-smoothing]').forEach((button) => {
-    button.setAttribute('aria-pressed', String(Number(button.dataset.smoothing) === Number(value)));
-  });
+    ? '저장한 지점마다 정지합니다. 추가된 중간점에서는 멈추지 않습니다.'
+    : '저장한 지점을 지나가며 구간을 이어 줍니다. 대기시간이 있는 지점에서는 정지합니다.';
 }
 
 function renderRefinementMonitor(data) {
@@ -2140,9 +2455,16 @@ function renderRefinementMonitor(data) {
   const events = data.path_refinement_events || [];
   const latest = events.at(-1);
   const monitor = byId('refinementMonitor');
+  if (state.refinementErrors?.[data.arm]) {
+    monitor.dataset.stage = 'failed';
+    monitor.textContent = `적용하지 못했습니다: ${state.refinementErrors[data.arm]}`;
+    byId('refinementDiagnostics').textContent = state.refinementErrors[data.arm];
+    return;
+  }
   if (!latest) {
-    monitor.textContent = '경로를 계산하면 시도별 분할 수와 위치·자세·관절 오차가 표시됩니다.';
+    monitor.textContent = '연결 방식을 고른 뒤 미리보기를 만들어 보세요.';
     monitor.dataset.stage = 'idle';
+    byId('refinementDiagnostics').textContent = '경로를 계산하면 세부 결과가 표시됩니다.';
     return;
   }
   const labels = { idle: '설정 적용됨', generating: '중간 관절점 생성 중', validating: '오차 검증 중',
@@ -2157,11 +2479,35 @@ function renderRefinementMonitor(data) {
     TOLERANCE_EXCEEDED: '허용 오차를 넘었습니다. 분할 수·재시도를 늘리거나 스무딩 강도를 낮추세요. 끝점 오차가 남으면 원본 목표를 확인하세요.',
     RESOURCE_LIMIT: '생성량 제한에 도달했습니다. 선택 구간을 줄이거나 구간을 나누어 계산하세요.',
   };
-  monitor.textContent = `${labels[latest.stage] || latest.stage}${latest.attempt ? ` · ${latest.attempt}차 · 구간당 ${latest.subdivisions} Cartesian 분할` : ''}\n`
-    + (latest.stage === 'success' ? `JOINT 구간당 중간점 ${latest.joint_intermediate_points}개 · 전체 경로점 ${latest.knot_count}개 · 적용 스무딩 ${format(latest.effective_smoothing_percent)}%\n` : '')
+  const simple = {
+    idle: '설정을 적용했습니다. 미리보기를 만들어 확인하세요.',
+    generating: '경로를 만들고 있습니다…', validating: '경로의 오차를 확인하고 있습니다…',
+    retry: '오차 범위에 맞도록 자동 조정하고 있습니다…',
+    failed: '경로를 만들지 못했습니다. 실행할 수 없습니다.', success: '미리보기 준비 완료',
+  };
+  monitor.textContent = simple[latest.stage] || '경로 계산 상태를 확인하고 있습니다.';
+  if (latest.stage === 'failed') {
+    const help = {
+      IK_FAILURE: '도달하기 어려운 지점이 있습니다. 위치나 방향을 조정해 주세요.',
+      JOINT_LIMIT: '관절이 움직일 수 있는 범위를 벗어났습니다. 목표 지점을 조정해 주세요.',
+      JOINT_STEP: '관절 변화가 너무 큽니다. 해당 구간의 속도를 낮춰 주세요.',
+      TOLERANCE_EXCEEDED: '경로 오차가 큽니다. 연결 정도를 낮춰 다시 계산해 주세요.',
+      RESOURCE_LIMIT: '계산할 구간이 너무 많습니다. 구간을 나눠 계산해 주세요.',
+    };
+    monitor.textContent += `\n${latest.segment_end_waypoint ? `${latest.segment_end_waypoint}번 지점: ` : ''}`
+      + (help[latest.reason_code] || '계산 결과의 상세 내용을 확인해 주세요.');
+  } else if (latest.stage === 'success') {
+    if (!data.trajectory) monitor.textContent = '경로가 변경되었습니다. 미리보기를 다시 만들어 주세요.';
+    else if (Number(latest.effective_smoothing_percent) < Number(latest.smoothing_percent)) {
+      monitor.textContent += '\n오차 범위에 맞춰 연결 정도를 자동으로 낮췄습니다.';
+    }
+  }
+  byId('refinementDiagnostics').textContent = `${labels[latest.stage] || latest.stage}${latest.attempt ? ` · ${latest.attempt}차` : ''}\n`
+    + (latest.stage === 'success' ? `${latest.automatic_subdivisions ? '구간별 중간점 자동 계산' : `JOINT 구간당 중간점 ${latest.joint_intermediate_points}개`} · 전체 경로점 ${latest.knot_count}개 · 적용 스무딩 ${format(latest.effective_smoothing_percent)}%\n` : '')
+    + (latest.segment_subdivisions?.length ? `구간별 분할 수: ${latest.segment_subdivisions.join(', ')}\n` : '')
     + (latest.ik_searches ? `관절 제한 회피 탐색 ${latest.ik_searches}회 · 여유를 줄여 허용한 해 ${latest.ik_relaxed_solutions}개 · 최소 IK 여유 ${format(latest.ik_min_margin_rad)} rad\n` : '')
     + (latest.position_tolerance_mm ? `허용: 위치 ${format(latest.position_tolerance_mm)} mm / 자세 ${format(latest.orientation_tolerance_deg)}° / JOINT ${format(latest.joint_tolerance_rad)} rad\n` : '')
-    + summary.map((event) => `${event.attempt}차: ${event.subdivisions}분할 · 최대 위치 ${format(event.max_position_error_mm)} mm / 자세 ${format(event.max_orientation_error_deg)}° / JOINT ${format(event.max_joint_error_rad)} rad`
+    + summary.map((event) => `${event.attempt}차: ${event.automatic_subdivisions ? '구간별 자동 분할' : `${event.subdivisions}분할`} · 최대 위치 ${format(event.max_position_error_mm)} mm / 자세 ${format(event.max_orientation_error_deg)}° / JOINT ${format(event.max_joint_error_rad)} rad`
       + (Number.isFinite(event.effective_smoothing_percent) ? ` · 적용 강도 ${format(event.effective_smoothing_percent)}%` : '')
       + (event.segment_end_waypoint ? ` · 도착 waypoint ${event.segment_end_waypoint}` : '')
       + (event.stage === 'success' ? '' : `\n원인: ${reasons[event.reason_code] || event.reason}\n상세: ${event.reason}`)).join('\n')
@@ -2169,7 +2515,7 @@ function renderRefinementMonitor(data) {
 }
 
 function renderRefinementControls(data) {
-  const defaults = { enabled: false, subdivisions: 10, smoothing_percent: 100,
+  const defaults = { enabled: false, subdivisions: 10, smoothing_percent: 100, automatic_subdivisions: true,
     position_tolerance_mm: 1, orientation_tolerance_deg: 1, joint_tolerance_rad: 0.01, max_refinements: 5 };
   const appliedKey = JSON.stringify(data.path_refinement || defaults);
   if (!state.refinementDrafts[data.arm] || state.refinementApplied[data.arm] !== appliedKey) {
@@ -2180,18 +2526,24 @@ function renderRefinementControls(data) {
   Object.entries(refinementFields).forEach(([key, id]) => {
     const input = byId(id);
     if (document.activeElement !== input) {
-      if (key === 'enabled') input.checked = draft[key];
+      if (key === 'enabled' || key === 'automatic_subdivisions') input.checked = draft[key];
       else input.value = key === 'subdivisions' ? draft[key] - 1 : draft[key];
     }
     input.disabled = Boolean(data.execution?.active) || Boolean(data.keyboard_control?.active) || state.refinementBusy;
   });
   updateRefinementStrength(draft.smoothing_percent);
+  byId('refinementManualPoints').hidden = draft.automatic_subdivisions;
+  byId('refinementSubdivisions').disabled ||= draft.automatic_subdivisions;
+  byId('refinementSamplingHint').textContent = draft.automatic_subdivisions
+    ? '중간점은 이동 거리에 맞춰 자동으로 추가합니다.' : '중간점 수를 직접 지정한 설정입니다. 고급 설정에서 자동 계산으로 바꿀 수 있습니다.';
   byId('refinementStrengthNumber').disabled = byId('refinementStrength').disabled;
+  byId('curveNoiseEnabled').disabled = byId('refinementEnabled').disabled;
+  window.waypointCurve?.setLocked(byId('refinementEnabled').disabled, data.arm);
+  window.waypointCurve?.syncCurrent(data);
+  byId('applyRefinement').textContent = byId('curveNoiseEnabled').checked
+    ? '계산 후 Waypoint에 적용' : '적용하고 미리보기';
   byId('applyRefinement').disabled = state.busy || state.refinementBusy || Boolean(data.execution?.active)
     || Boolean(data.keyboard_control?.active);
-  document.querySelectorAll('[data-smoothing]').forEach((button) => {
-    button.disabled = byId('refinementStrength').disabled;
-  });
   renderRefinementMonitor(data);
 }
 
@@ -2199,9 +2551,10 @@ Object.entries(refinementFields).forEach(([key, id]) => {
   byId(id).addEventListener('input', (event) => {
     const draft = state.refinementDrafts[state.activeArm];
     if (!draft) return;
-    draft[key] = key === 'enabled' ? event.target.checked
+    draft[key] = (key === 'enabled' || key === 'automatic_subdivisions') ? event.target.checked
       : Number(event.target.value) + (key === 'subdivisions' ? 1 : 0);
     if (key === 'smoothing_percent') updateRefinementStrength(draft[key]);
+    if (key === 'automatic_subdivisions') renderRefinementControls(state.armData[state.activeArm]);
   });
 });
 byId('refinementStrengthNumber').addEventListener('input', (event) => {
@@ -2209,27 +2562,31 @@ byId('refinementStrengthNumber').addEventListener('input', (event) => {
   byId('refinementStrength').value = event.target.value;
   byId('refinementStrength').dispatchEvent(new Event('input'));
 });
-document.querySelectorAll('[data-smoothing]').forEach((button) => {
-  button.addEventListener('click', () => {
-    byId('refinementStrength').value = button.dataset.smoothing;
-    byId('refinementStrength').dispatchEvent(new Event('input'));
-  });
-});
+window.getWaypointCurveArm = () => state.activeArm;
 byId('applyRefinement').addEventListener('click', async () => {
   if (state.busy || state.refinementBusy) return;
   const arm = state.activeArm;
   const settings = { ...state.refinementDrafts[arm] };
   const invalid = [...Object.values(refinementFields), 'refinementStrengthNumber']
     .map(byId).find((input) => !input.checkValidity());
-  if (invalid) { invalid.reportValidity(); return; }
+  if (invalid) { byId('refinementAdvanced').open = true; invalid.reportValidity(); return; }
+  state.refinementErrors ??= { left: '', right: '' };
+  state.refinementErrors[arm] = '';
   state.refinementBusy = true;
   renderRefinementControls(state.armData[arm]);
   try {
+    if (byId('curveNoiseEnabled').checked) {
+      if (!settings.enabled) throw new Error('곡선을 추가하려면 부드럽게 연결을 켜 주세요.');
+      const generated = await window.waypointCurve.generate(arm);
+      await request('/api/waypoints/import', { method: 'POST',
+        body: JSON.stringify({ ...generated, path_refinement: settings }) });
+    }
     await request('/api/path-refinement', { method: 'POST',
       body: JSON.stringify({ arm, path_refinement: settings }) });
     await refresh();
     await runAction('preview', {}, arm);
   } catch (error) {
+    state.refinementErrors[arm] = error.message;
     showToast(error.message, true);
   } finally {
     state.refinementBusy = false;

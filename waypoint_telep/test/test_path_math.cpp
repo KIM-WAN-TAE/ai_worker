@@ -14,6 +14,7 @@ TEST(PathRefinement, RejectsUnsafeWireSettings)
   const std::vector<double> valid{1, 10, 0.6, 0.001, 0.01, 0.01, 5};
   const auto settings = waypoint_telep::parse_path_refinement(valid);
   EXPECT_EQ(settings.subdivisions, 10u);
+  EXPECT_FALSE(settings.automatic_subdivisions);
   EXPECT_DOUBLE_EQ(settings.smoothing, 0.6);
   EXPECT_THROW(waypoint_telep::parse_path_refinement({}), std::invalid_argument);
   for (const auto & change : std::vector<std::pair<std::size_t, double>>{
@@ -24,6 +25,36 @@ TEST(PathRefinement, RejectsUnsafeWireSettings)
     bad[change.first] = change.second;
     EXPECT_THROW(waypoint_telep::parse_path_refinement(bad), std::invalid_argument);
   }
+}
+
+TEST(PathRefinement, AutomaticSamplingFollowsDistanceRotationAndJointTravel)
+{
+  using waypoint_telep::automatic_segment_subdivisions;
+  waypoint_telep::CartesianPose start, goal;
+  const std::vector<double> joints(8, 0);
+  EXPECT_EQ(automatic_segment_subdivisions(start, goal, joints, joints), 1u);
+  goal.position[0] = 0.005;
+  EXPECT_EQ(automatic_segment_subdivisions(start, goal, joints, joints), 1u);
+  goal.position[0] = 0.10;
+  EXPECT_EQ(automatic_segment_subdivisions(start, goal, joints, joints), 10u);
+  goal.position[0] = 0.35;
+  EXPECT_EQ(automatic_segment_subdivisions(start, goal, joints, joints), 35u);
+  goal.position[0] = 0;
+  goal.orientation = {0, 0, std::sin(M_PI / 4), std::cos(M_PI / 4)};
+  EXPECT_EQ(automatic_segment_subdivisions(start, goal, joints, joints), 18u);
+  goal = start;
+  auto bent = joints;
+  bent[3] = M_PI / 2;
+  EXPECT_EQ(automatic_segment_subdivisions(start, goal, joints, bent), 18u);
+  EXPECT_THROW(automatic_segment_subdivisions(start, goal, joints, {}), std::invalid_argument);
+  bent[3] = NAN;
+  EXPECT_THROW(automatic_segment_subdivisions(start, goal, joints, bent), std::invalid_argument);
+  goal.position[0] = 50;
+  EXPECT_THROW(automatic_segment_subdivisions(start, goal, joints, joints), std::runtime_error);
+  auto automatic = std::vector<double>{1, 10, 0.6, 0.001, 0.01, 0.01, 5, 1};
+  EXPECT_TRUE(waypoint_telep::parse_path_refinement(automatic).automatic_subdivisions);
+  automatic[7] = 0.5;
+  EXPECT_THROW(waypoint_telep::parse_path_refinement(automatic), std::invalid_argument);
 }
 
 TEST(PathRefinement, ReferenceUsesUniformPositionAndShortestOrientation)

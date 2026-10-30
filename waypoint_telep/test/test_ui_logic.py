@@ -18,8 +18,71 @@ MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 
 
+def test_interpolated_flags_preserve_explicit_origins_and_recognize_legacy_names():
+    state = {'waypoint_count': 5, 'waypoint_names': [
+        '구간 1 곡선 중간점 1', '접근', '구간 2 직선 중간점 3', '삽입', '구간 1 곡선 중간점 9'],
+        'waypoint_interpolated': [False, True, None]}
+    assert MODULE.WaypointUiBridge._interpolated_flags(state) == [False, True, True, False, True]
+
+
+def test_legacy_endpoint_interpolation_names_recover_old_false_exports():
+    names = ['왼팔 지점 1', '왼팔 지점 1-보간1 (1→2)', '왼팔 지점 6-직선보간47',
+             '오른팔 지점 2-보간3 (2->3)', '왼팔 지점 7', '보간 작업 시작']
+    state = dict(waypoint_count=len(names), waypoint_names=names,
+                 waypoint_interpolated=[False]*len(names), interpolated_provenance_version=1)
+    assert MODULE.WaypointUiBridge._interpolated_flags(state) == [False, True, True, True, False, False]
+    state['interpolated_provenance_version'] = 2
+    assert MODULE.WaypointUiBridge._interpolated_flags(state) == [False]*len(names)
+    state['waypoint_interpolated'] = [None]*len(names)
+    assert MODULE.WaypointUiBridge._interpolated_flags(state) == [False, True, True, True, False, False]
+    for invalid in ('2', True, 0, 3, None):
+        state['interpolated_provenance_version'] = invalid
+        with pytest.raises(ValueError):
+            MODULE.WaypointUiBridge._interpolated_flags(state)
+
+
+@pytest.mark.parametrize('start,end', [(2, 4), (4, 2), (3, 3), (1, 5)])
+def test_remove_waypoint_range_uses_original_descending_indices(start, end):
+    bridge = object.__new__(MODULE.WaypointUiBridge)
+    bridge.lock = threading.Lock()
+    bridge.arm_states = {'right': {'waypoint_count': 5}}
+    bridge._execution_is_active = lambda: False
+    bridge._keyboard_is_active = lambda: False
+    bridge._select_arm = lambda arm: arm
+    calls = []
+    bridge.remove_waypoint = lambda payload: calls.append(payload)
+    result = bridge.remove_waypoint_range(dict(arm='right', start_index=start, end_index=end, expected_count=5))
+    indices = list(range(max(start, end), min(start, end)-1, -1))
+    assert calls == [dict(arm='right', index=i) for i in indices]
+    assert result['removed_count'] == len(indices)
+    for patch in ({'start_index': 0}, {'end_index': 6}, {'start_index': True}, {'expected_count': 4}):
+        with pytest.raises(ValueError):
+            bridge.remove_waypoint_range(dict(arm='right', start_index=2, end_index=4, expected_count=5) | patch)
+    bridge._keyboard_is_active = lambda: True
+    with pytest.raises(RuntimeError):
+        bridge.remove_waypoint_range(dict(arm='right', start_index=2, end_index=4))
+
+
+def test_remove_waypoint_range_reports_partial_failure():
+    bridge = object.__new__(MODULE.WaypointUiBridge)
+    bridge.lock = threading.Lock()
+    bridge.arm_states = {'right': {'waypoint_count': 5}}
+    bridge._execution_is_active = lambda: False
+    bridge._keyboard_is_active = lambda: False
+    bridge._select_arm = lambda arm: arm
+    def remove(payload):
+        if payload['index'] == 3:
+            raise RuntimeError('timeout')
+    bridge.remove_waypoint = remove
+    with pytest.raises(RuntimeError, match='1개 삭제가 확인'):
+        bridge.remove_waypoint_range(dict(arm='right', start_index=2, end_index=4))
+
+
 def test_path_refinement_user_units_defaults_and_validation():
     assert MODULE.parse_path_refinement(None)['enabled'] is False
+    assert MODULE.parse_path_refinement(None)['automatic_subdivisions'] is True
+    assert MODULE.parse_path_refinement({'subdivisions': 10})['automatic_subdivisions'] is False
+    assert MODULE.parse_path_refinement({'automatic_subdivisions': True})['automatic_subdivisions'] is True
     for strength in (0, 30, 60, 100):
         result = MODULE.parse_path_refinement({'enabled': True, 'smoothing_percent': strength})
         assert result['smoothing_percent'] == strength
@@ -27,7 +90,7 @@ def test_path_refinement_user_units_defaults_and_validation():
     for value in ([], True, 'settings'):
         with pytest.raises(ValueError):
             MODULE.parse_path_refinement(value)
-    for patch in ({'enabled': 1}, {'subdivisions': True}, {'subdivisions': 0},
+    for patch in ({'enabled': 1}, {'automatic_subdivisions': 1}, {'subdivisions': True}, {'subdivisions': 0},
                   {'subdivisions': 1.2}, {'subdivisions': 257}, {'smoothing_percent': 101},
                   {'position_tolerance_mm': 0}, {'position_tolerance_mm': float('nan')},
                   {'orientation_tolerance_deg': float('inf')}, {'joint_tolerance_rad': -1},
@@ -51,7 +114,7 @@ def test_stop_during_planning_bypasses_execution_lock_and_sets_cancellation():
     assert bridge.execution_stop.is_set()
 
 
-@pytest.mark.parametrize('expected', ['JOINT_TIMING_UPDATED', 'PATH_REFINEMENT_UPDATED'])
+@pytest.mark.parametrize('expected', ['JOINT_TIMING_UPDATED', 'PATH_REFINEMENT_UPDATED', 'JOINT_WAYPOINT_ADDED:'])
 def test_planner_settings_wait_for_topic_match_and_their_own_ack(monkeypatch, expected):
     bridge = object.__new__(MODULE.WaypointUiBridge)
     bridge.lock = threading.Lock()
@@ -122,11 +185,21 @@ def test_joint_timing_rejects_invalid_file_before_import():
     valid = dict(speed_mps=0.0327590555675, preserve_start_waypoint=225,
                  preserve_end_waypoint=231)
     assert MODULE.parse_joint_timing(valid, 477) == valid
+    uniform = dict(speed_mps=0.025, preserve_start_waypoint=0, preserve_end_waypoint=0)
+    assert MODULE.parse_joint_timing(uniform, 477) == uniform
     for patch in ({'speed_mps': float('nan')}, {'speed_mps': True},
-                  {'speed_mps': 0.11}, {'preserve_start_waypoint': 1},
+                  {'speed_mps': 1.81}, {'preserve_start_waypoint': 1},
                   {'preserve_end_waypoint': 478}, {'preserve_start_waypoint': 232}):
         with pytest.raises(ValueError):
             MODULE.parse_joint_timing({**valid, **patch}, 477)
+
+
+def test_joint_timing_supports_faster_tcp_speeds_and_configured_ceiling():
+    timing = dict(speed_mps=0.3, preserve_start_waypoint=0, preserve_end_waypoint=0)
+    assert MODULE.parse_joint_timing(timing, 350) == timing
+    assert MODULE.parse_joint_timing({**timing, 'speed_mps': 1.8}, 350)['speed_mps'] == 1.8
+    with pytest.raises(ValueError):
+        MODULE.parse_joint_timing(timing, 350, maximum_speed_mps=0.1)
 
 
 def _expanded_f2_description():
