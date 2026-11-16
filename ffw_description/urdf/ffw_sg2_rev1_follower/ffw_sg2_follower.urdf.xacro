@@ -123,7 +123,11 @@
   <!-- Gazebo plugins/sensors -->
   <xacro:ffw_sg2_follower_gazebo prefix="$(arg prefix)" />
 
-  <xacro:ffw_follower_body parent="$(arg prefix)base_link" prefix="$(arg prefix)">
+  <!-- Keep the planner within the SG2 configured PH42 encoder limits. -->
+  <xacro:ffw_follower_body parent="$(arg prefix)base_link" prefix="$(arg prefix)"
+      arm_j4_upper="1.0785802414820915"
+      left_j7_lower="-1.5707963267948966" left_j7_upper="1.3639424895214947"
+      right_j7_lower="-1.5707963267948966" right_j7_upper="1.3639424895214947">
     <origin xyz="-0.0199 0 1.4316" rpy="0 0 0" />
   </xacro:ffw_follower_body>
 

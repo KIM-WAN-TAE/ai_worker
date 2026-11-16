@@ -271,3 +271,78 @@ TEST(PathMath, RejectsInvalidQuaternion)
 }
 
 }  // namespace waypoint_telep
+
+TEST(EqualTime, ScheduledDenseReplayFitsActualControlPeriods)
+{
+  std::vector<double> base(353, .1), scales(353, 1), dwells(353, 0);
+  std::vector<bool> excluded(353, false);
+  excluded[0] = true;
+  dwells[280] = .2; dwells[304] = .2;
+  const auto result = waypoint_telep::scheduled_segment_scales_for_total(
+    base, scales, excluded, dwells, 10.0, 90.0, 100.0);
+  std::size_t samples = 40;
+  for (std::size_t i = 1; i < base.size(); ++i) {
+    const auto count = waypoint_telep::control_sample_count(base[i] / result.scales[i], 100.0);
+    EXPECT_TRUE(count == 2 || count == 3);
+    samples += count;
+  }
+  EXPECT_EQ(samples, 1000u);
+  EXPECT_DOUBLE_EQ(result.scales[0], scales[0]);
+  EXPECT_THROW(waypoint_telep::scheduled_segment_scales_for_total(
+    base, scales, excluded, dwells, 7.0, 90.0, 100.0), std::invalid_argument);
+  EXPECT_THROW(waypoint_telep::scheduled_segment_scales_for_total(
+    base, scales, excluded, dwells, 10.001, 90.0, 100.0), std::invalid_argument);
+}
+
+TEST(EqualTime, ScheduledTimingRetainsExcludedScaleAndAccountsForShortDwell)
+{
+  const auto result = waypoint_telep::scheduled_segment_scales_for_total(
+    {.1, .1, .1}, {1, 1, 5}, {true, false, true}, {.003, 0, 0}, .08, 90, 100);
+  EXPECT_DOUBLE_EQ(result.scales[2], 5);
+  EXPECT_NEAR(result.fixed_s, .03, 1.e-12);
+  EXPECT_NEAR(.1 / result.scales[1], .05, 1.e-12);
+  EXPECT_EQ(waypoint_telep::control_sample_count(.03000000000000001, 100), 3u);
+}
+
+TEST(EqualTime, ScheduledMotionMinimaGiveLargeGripperMovesMoreTime)
+{
+  std::vector<double> base(493, .1), scales(493, 1), dwells(493, 0), minimum(493, .01);
+  std::vector<bool> excluded(493, false);
+  excluded[0] = true;
+  dwells[20] = 1.9;
+  base[7] = .8816;
+  minimum[7] = 2.0 * .8816 / 5.0;
+  const auto result = waypoint_telep::scheduled_segment_scales_for_total(
+    base, scales, excluded, dwells, 10, 90, 100, minimum);
+  EXPECT_GE(base[7] / result.scales[7], minimum[7]);
+  double scheduled = 1.9;
+  for (std::size_t i = 1; i < base.size(); ++i) {
+    scheduled += waypoint_telep::control_sample_count(base[i] / result.scales[i], 100, 1) / 100.0;
+  }
+  EXPECT_NEAR(scheduled, 10, 1.e-9);
+}
+
+TEST(EqualTime, ScheduledTravelWeightsPreventFastSparseDescent)
+{
+  const std::vector<double> base{.1, .1, .1, .1};
+  const std::vector<double> distance{0, .001, .002, .03};
+  const auto result = waypoint_telep::scheduled_segment_scales_for_total(
+    base, {1, 1, 1, 1}, {true, false, false, false}, {0, 0, 0, 0},
+    .66, 90, 100, {.01, .01, .01, .02}, distance);
+  EXPECT_NEAR(base[1] / result.scales[1], .02, 1.e-12);
+  EXPECT_NEAR(base[2] / result.scales[2], .04, 1.e-12);
+  EXPECT_NEAR(base[3] / result.scales[3], .60, 1.e-12);
+  for (std::size_t i = 1; i < base.size(); ++i) {
+    EXPECT_NEAR(distance[i] / (base[i] / result.scales[i]), .05, 1.e-10);
+  }
+}
+
+TEST(EqualTime, ScheduledTravelWeightsKeepMotionMinimumAndZeroTravel)
+{
+  const auto result = waypoint_telep::scheduled_segment_scales_for_total(
+    {.1, .1, .1, .1}, {1, 1, 1, 1}, {true, false, false, false}, {0, 0, 0, 0},
+    1, 90, 100, {.01, .2, .01, .3}, {0, .001, .1, 0});
+  EXPECT_NEAR(.1 / result.scales[1], .2, 1.e-12);
+  EXPECT_NEAR(.1 / result.scales[3], .3, 1.e-12);
+  EXPECT_NEAR(.1 / result.scales[2], .5, 1.e-12);
+}

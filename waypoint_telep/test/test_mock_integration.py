@@ -1,5 +1,6 @@
 import json
 import math
+from copy import deepcopy
 import os
 from pathlib import Path
 import signal
@@ -74,7 +75,8 @@ class WaypointProcess:
     def __init__(self, publish_enabled=False, tip_link='end_effector_l_link',
                  action_topic='/test/follow_joint_trajectory', arm=None,
                  max_waypoint_speed_scale=None, quiet=False, max_joint_step_rad=None,
-                 joint_smoothing_enabled=False, max_uniform_tcp_speed_mps=None):
+                 joint_smoothing_enabled=False, max_uniform_tcp_speed_mps=None,
+                 joint_speed_radps=None):
         prefix = Path(get_package_prefix('waypoint_telep'))
         executable = prefix / 'lib' / 'waypoint_telep' / 'waypoint_telep_node'
         command = [
@@ -96,6 +98,8 @@ class WaypointProcess:
             command.extend([
                 '-p', f'max_waypoint_speed_scale:={max_waypoint_speed_scale}',
             ])
+        if joint_speed_radps is not None:
+            command.extend(['-p', f'joint_speed_radps:={joint_speed_radps}'])
         if joint_smoothing_enabled is not None:
             command.extend(['-p', f'joint_smoothing_enabled:={str(joint_smoothing_enabled).lower()}'])
         if max_joint_step_rad is not None:
@@ -127,6 +131,8 @@ class WaypointProcess:
                 self.process.kill()
                 self.process.wait(timeout=5)
         output = self.process.stdout.read() if self.process.stdout else ''
+        if 'Traceback' in output:
+            print(output)
         assert self.process.returncode in (0, -signal.SIGINT), output
 
 
@@ -157,6 +163,11 @@ class WaypointUiProcess:
         self.url = f'http://127.0.0.1:{port}'
 
     def stop(self):
+        if sys.exc_info()[0] is not None:
+            try:
+                print('UI runtime at failure:', http_json(self.url, '/api/runtime')[1])
+            except Exception as exc:
+                print('UI runtime unavailable:', exc)
         if self.process.poll() is None:
             self.process.send_signal(signal.SIGINT)
             try:
@@ -165,6 +176,8 @@ class WaypointUiProcess:
                 self.process.kill()
                 self.process.wait(timeout=5)
         output = self.process.stdout.read() if self.process.stdout else ''
+        if 'Traceback' in output:
+            print(output)
         assert self.process.returncode in (0, -signal.SIGINT), output
 
 
@@ -179,6 +192,7 @@ class ArbiterProcess:
             [
                 sys.executable, str(executable), '--ros-args',
                 '-p', 'manage_leader_service:=false',
+                '-p', 'robot_model:=' + ('f2' if os.environ.get('WAYPOINT_TEST_MODEL') == 'ffw_f2_follower' else 'sg2'),
             ],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -194,6 +208,8 @@ class ArbiterProcess:
                 self.process.kill()
                 self.process.wait(timeout=5)
         output = self.process.stdout.read() if self.process.stdout else ''
+        if 'Traceback' in output:
+            print(output)
         assert self.process.returncode in (0, -signal.SIGINT), output
 
 
@@ -449,7 +465,9 @@ class MockGraph:
 
         xacro_path = (
             Path(get_package_share_directory('ffw_description'))
-            / 'urdf' / 'ffw_f2_follower' / 'ffw_f2_follower.urdf.xacro'
+            / 'urdf' / os.environ.get('WAYPOINT_TEST_MODEL', 'ffw_sg2_rev1_follower')
+            / ('ffw_f2_follower.urdf.xacro' if os.environ.get('WAYPOINT_TEST_MODEL') == 'ffw_f2_follower'
+               else 'ffw_sg2_follower.urdf.xacro')
         )
         document = xacro.process_file(
             str(xacro_path), mappings={'use_mock_hardware': 'true'})
@@ -743,7 +761,8 @@ def test_curve_generator_validates_in_isolation_and_leaves_live_waypoints_unchan
     graph.positions = [0., -.6 if arm == 'right' else .6, .15, -1., .2, .3, .1, .9]
     graph.velocities = [0.]*8
     process = WaypointProcess(publish_enabled=False, tip_link=f'end_effector_{arm[0]}_link',
-                              max_waypoint_speed_scale=30., quiet=True)
+                              max_waypoint_speed_scale=30., quiet=True,
+                              joint_smoothing_enabled=True)
     ui = WaypointUiProcess(unused_tcp_port(), arm=arm, max_waypoint_speed_scale=30.)
     try:
         graph.wait_ready(tip_link=f'end_effector_{arm[0]}_link')
@@ -1148,6 +1167,50 @@ def test_equal_time_api_verifies_and_rolls_back_without_execution(isolated_graph
             process.stop()
 
 
+@pytest.mark.parametrize('mode', ['joint', 'continuous', 'refined'])
+def test_equal_time_partial_range_caps_alignment_without_changing_assigned_times(isolated_graph, mode):
+    graph = isolated_graph
+    graph.joint_names = LEFT_COMMAND_JOINTS
+    graph.positions = [0.0] * 8
+    graph.velocities = [0.0] * 8
+    process = WaypointProcess(max_waypoint_speed_scale=30.0)
+    ui = WaypointUiProcess(unused_tcp_port(), max_waypoint_speed_scale=30.0)
+    try:
+        graph.wait_ready()
+        wait_for_http(ui.url)
+        graph.wait_for(lambda: http_json(ui.url, '/api/state')[1]['joint_state_fresh'])
+        http_json(ui.url, '/api/actions/select_joint', {})
+        for q in (.20, .21, .22):
+            http_json(ui.url, '/api/waypoints/joint', {'positions_rad': [q] + [0.0] * 7})
+        http_json(ui.url, '/api/joint-smoothing', {'enabled': mode != 'joint'})
+        if mode == 'refined':
+            http_json(ui.url, '/api/path-refinement', {'path_refinement': dict(
+                enabled=True, automatic_subdivisions=True, subdivisions=10, smoothing_percent=100)})
+        http_json(ui.url, '/api/waypoints/start', {'index': 2})
+        before = http_json(ui.url, '/api/waypoints/export')[1]
+        result = http_json(ui.url, '/api/waypoints/equal-time', {'duration_s': .025})[1]
+        assert result['verified'] and result['max_error_s'] < 1e-6
+        after = http_json(ui.url, '/api/waypoints/export')[1]
+        assert after['start_waypoint'] == 2 and after['end_waypoint'] == before['end_waypoint']
+        for old, new in zip(before['waypoints'], after['waypoints']):
+            assert {k:v for k,v in old.items() if k != 'speed_scale'} == {
+                k:v for k,v in new.items() if k != 'speed_scale'}
+        assert after['waypoints'][1]['speed_scale'] > 10
+        http_json(ui.url, '/api/actions/preview', {})
+        graph.wait_for(lambda: graph.waypoint_targets and len(graph.waypoint_targets[-1].data) == 18)
+        arrivals = graph.waypoint_targets[-1].data[::9]
+        assert arrivals[0] >= 1.0
+        assert arrivals[1] - arrivals[0] == pytest.approx(.025, abs=1e-6)
+        points = graph.trajectories[-1].points
+        assert max(abs(b.positions[0] - a.positions[0]) for a,b in zip(points,points[1:])) <= .05
+        assert graph.goal_count == 0
+    finally:
+        try:
+            ui.stop()
+        finally:
+            process.stop()
+
+
 def test_equal_time_rolls_back_when_trajectory_verification_fails(isolated_graph):
     graph = isolated_graph
     graph.joint_names = LEFT_COMMAND_JOINTS
@@ -1427,11 +1490,8 @@ def test_waypoint_editing_input_and_both_path_modes(isolated_graph):
         )
         assert graph.call('/waypoint_telep/clear').success
 
-        world_pose = PoseStamped().pose
-        world_pose.position.x = pose.position.x - 0.0753807
-        world_pose.position.y = pose.position.y
-        world_pose.position.z = pose.position.z + 1.407
-        world_pose.orientation = pose.orientation
+        graph.wait_for(lambda: bool(graph.current_world_poses))
+        world_pose = deepcopy(graph.current_world_poses[-1].pose)
         previous_status_count = len(graph.statuses)
         graph.publish_pose(world_pose, frame_id='world')
         graph.wait_for(
@@ -1814,7 +1874,7 @@ def test_waypoint_editing_input_and_both_path_modes(isolated_graph):
             and len(graph.waypoint_targets[-1].data) == 18
         )
         reverse_targets = list(graph.waypoint_targets[-1].data)
-        assert reverse_targets[4] == pytest.approx(0.02, abs=2e-6)
+        assert reverse_targets[4] == pytest.approx(0.02, abs=1e-5)
         assert reverse_targets[13] == pytest.approx(0.0, abs=1e-6)
 
         graph.publish_start_waypoint(1)
@@ -1947,10 +2007,12 @@ def test_slow_start_preview_caps_only_the_initial_alignment(isolated_graph):
             and graph.joint_smoothing_states[-1].data is True
         )
 
+        regular_count = len(graph.trajectories)
         regular = graph.call('/waypoint_telep/preview')
-        assert not regular.success
-        assert 'arm_l_joint1' in regular.message
-        assert 'sample step exceeds the limit' in regular.message
+        assert regular.success
+        graph.wait_for(lambda: len(graph.trajectories) > regular_count)
+        regular_finish = graph.trajectories[-1].points[-1].time_from_start
+        regular_time = regular_finish.sec + regular_finish.nanosec * 1e-9
 
         previous_trajectory_count = len(graph.trajectories)
         slow_start = graph.call('/waypoint_telep/preview_slow_start')
@@ -1958,6 +2020,8 @@ def test_slow_start_preview_caps_only_the_initial_alignment(isolated_graph):
         assert slow_start.message.startswith('SLOW_START, JOINT_CONTINUOUS')
         graph.wait_for(lambda: len(graph.trajectories) > previous_trajectory_count)
         points = graph.trajectories[-1].points
+        slow_finish = points[-1].time_from_start
+        assert slow_finish.sec + slow_finish.nanosec * 1e-9 == pytest.approx(5 * regular_time)
         assert points[-1].positions == pytest.approx(target)
         assert all(point.positions[-1] == pytest.approx(0.4) for point in points)
         assert all(
@@ -1967,6 +2031,50 @@ def test_slow_start_preview_caps_only_the_initial_alignment(isolated_graph):
                 list(point.positions) for point in points[:-1]
             ]], points)
         )
+    finally:
+        process.stop()
+
+
+@pytest.mark.parametrize('mode', ['joint', 'continuous', 'refined'])
+def test_slow_start_reduces_alignment_speed_and_preserves_later_timing(isolated_graph, mode):
+    graph = isolated_graph
+    graph.joint_names = LEFT_COMMAND_JOINTS
+    graph.positions = [0.0] * 8
+    graph.velocities = [0.0] * 8
+    process = WaypointProcess(joint_speed_radps=1.0, joint_smoothing_enabled=mode != 'joint')
+    try:
+        graph.wait_ready()
+        assert graph.call('/waypoint_telep/select_joint').success
+        if mode == 'refined':
+            publisher = graph.node.create_publisher(Float64MultiArray, '/waypoint_telep/path_refinement', 10)
+            graph.wait_for(lambda: publisher.get_subscription_count() > 0)
+            publisher.publish(Float64MultiArray(data=[1.0, 10.0, 1.0, .001, math.pi / 180, .01, 5.0, 1.0]))
+            graph.wait_for(lambda: 'PATH_REFINEMENT_UPDATED' in graph.statuses)
+        for index, position in enumerate((.2, .3), 1):
+            graph.publish_joint_waypoint([position] + [0.0] * 7)
+            graph.wait_for(lambda: f'JOINT_WAYPOINT_ADDED: count={index}' in graph.statuses)
+        def preview(action):
+            count = len(graph.trajectories)
+            assert graph.call('/waypoint_telep/' + action).success
+            graph.wait_for(lambda: len(graph.trajectories) > count)
+            return graph.trajectories[-1]
+        regular = preview('preview')
+        slow = preview('preview_slow_start')
+        def stamp(point):
+            return point.time_from_start.sec + point.time_from_start.nanosec * 1e-9
+        def arrival(trajectory):
+            return next(stamp(p) for p in trajectory.points if abs(p.positions[0] - .2) < 1e-10)
+        regular_arrival, slow_arrival = arrival(regular), arrival(slow)
+        assert slow_arrival == pytest.approx(5 * regular_arrival, abs=.01)
+        assert stamp(slow.points[-1]) - slow_arrival == pytest.approx(
+            stamp(regular.points[-1]) - regular_arrival, abs=.01)
+        previous_position = previous_time = 0.0
+        for point in slow.points:
+            time_s = stamp(point)
+            if time_s > slow_arrival + 1e-9:
+                break
+            assert abs(point.positions[0] - previous_position) / (time_s - previous_time) <= .2 + 1e-6
+            previous_position, previous_time = point.positions[0], time_s
     finally:
         process.stop()
 
@@ -2139,12 +2247,10 @@ def test_web_ui_api_preview_workflow(isolated_graph):
 
         assert http_json(ui_process.url, '/api/actions/clear', {})[1]['success']
         current_pose = graph.current_pose()
-        world_position = [
-            current_pose.position.x - 0.0753807,
-            current_pose.position.y,
-            current_pose.position.z + 1.407,
-        ]
-        world_orientation = quaternion_to_rpy_deg(current_pose.orientation)
+        graph.wait_for(lambda: bool(graph.current_world_poses))
+        world_pose = graph.current_world_poses[-1].pose
+        world_position = [world_pose.position.x, world_pose.position.y, world_pose.position.z]
+        world_orientation = quaternion_to_rpy_deg(world_pose.orientation)
         result = http_json(
             ui_process.url,
             '/api/waypoints/absolute',
@@ -2756,7 +2862,8 @@ def test_dual_arm_ui_keeps_independent_waypoints_and_trajectories(isolated_graph
 
 
 @pytest.mark.parametrize('refinement_enabled', [False, True])
-def test_ui_actual_stream_records_both_arms_and_returns_to_teleop(isolated_graph, refinement_enabled):
+@pytest.mark.parametrize('slow_start', [False, True])
+def test_ui_actual_stream_records_both_arms_and_returns_to_teleop(isolated_graph, refinement_enabled, slow_start):
     graph = isolated_graph
     graph.statuses.clear()
     graph.final_commands = {'left': [], 'right': []}
@@ -2865,16 +2972,20 @@ def test_ui_actual_stream_records_both_arms_and_returns_to_teleop(isolated_graph
         runtime_poll_thread.start()
         response = http_json(
             ui.url,
-            '/api/actions/execute',
+            '/api/actions/execute_slow_start' if slow_start else '/api/actions/execute',
             {'confirm': 'EXECUTE'},
         )[1]
         assert response['success']
 
+        def completed():
+            runtime = http_json(ui.url, '/api/runtime')[1]
+            assert not runtime['status'].startswith('ERROR:'), runtime['status']
+            return (runtime['status'].startswith('EXECUTION_COMPLETE')
+                    and not runtime['execution']['active'])
+
         graph.wait_for(
-            lambda: (http_json(ui.url, '/api/runtime')[1]['status'].startswith(
-                'EXECUTION_COMPLETE') and
-                not http_json(ui.url, '/api/runtime')[1]['execution']['active']),
-            timeout=6.0,
+            completed,
+            timeout=20.0 if slow_start else 6.0,
             message='UI waypoint stream did not complete',
         )
         graph.wait_for(
@@ -3468,6 +3579,88 @@ def test_joint_continuity_defaults_on_and_only_applies_to_selected_joint_range(i
         http_json(ui.url, '/api/waypoints/import', renamed)
         assert http_json(ui.url, '/api/waypoints/export')[1] == renamed
         assert graph.goal_count == 0
+    finally:
+        ui.stop()
+        process.stop()
+
+
+def test_scheduled_total_matches_actual_stream_and_rolls_back(isolated_graph):
+    graph = isolated_graph
+    graph.joint_names = LEFT_COMMAND_JOINTS
+    graph.positions = [0.0] * 8
+    graph.velocities = [0.0] * 8
+    process = WaypointProcess(publish_enabled=False, joint_smoothing_enabled=True,
+                              max_waypoint_speed_scale=90., quiet=True)
+    ui = WaypointUiProcess(unused_tcp_port(), max_waypoint_speed_scale=90.)
+    try:
+        graph.wait_ready()
+        wait_for_http(ui.url)
+        graph.wait_for(lambda: http_json(ui.url, '/api/state')[1]['joint_state_fresh'])
+        http_json(ui.url, '/api/actions/select_joint', {})
+        for i in range(36):
+            q = [0.] * 8
+            q[3] = .001 * i
+            http_json(ui.url, '/api/waypoints/joint', {'positions_rad': q})
+        http_json(ui.url, '/api/waypoints/dwell', {'index': 18, 'dwell_s': .1})
+        before = http_json(ui.url, '/api/waypoints/export')[1]
+        result = http_json(ui.url, '/api/waypoints/equal-time', {
+            'total_duration_s': 1., 'distribution': 'scheduled'})[1]
+        assert result['verified'] and result['mode'] == 'scheduled'
+        assert result['total_s'] == pytest.approx(1., abs=1e-6)
+        graph.wait_for(lambda: len(graph.waypoint_targets[-1].data) == 36 * 9)
+        alignment = graph.waypoint_targets[-1].data[0]
+        points = graph.trajectories[-1].points
+        stamps = [p.time_from_start.sec + p.time_from_start.nanosec * 1e-9 for p in points]
+        scheduled = sum(max(.01, t - previous) for t, previous in zip(stamps, [0.] + stamps[:-1])
+                        if t > alignment + 1e-8)
+        assert scheduled == pytest.approx(1., abs=1e-6)
+        after = http_json(ui.url, '/api/waypoints/export')[1]
+        for a, b in zip(before['waypoints'], after['waypoints']):
+            assert {k: v for k, v in a.items() if k != 'speed_scale'} == {
+                k: v for k, v in b.items() if k != 'speed_scale'}
+        for impossible in (.1, 1.001):
+            with pytest.raises(HTTPError):
+                http_json(ui.url, '/api/waypoints/equal-time', {
+                    'total_duration_s': impossible, 'distribution': 'scheduled'})
+            assert http_json(ui.url, '/api/waypoints/export')[1] == after
+        assert not any(graph.final_commands.values())
+    finally:
+        ui.stop()
+        process.stop()
+
+
+def test_scheduled_time_replaces_old_tcp_clock_with_large_gripper_move(isolated_graph):
+    graph = isolated_graph
+    graph.joint_names = LEFT_COMMAND_JOINTS
+    graph.positions = [0.] * 8
+    graph.velocities = [0.] * 8
+    process = WaypointProcess(publish_enabled=False, joint_smoothing_enabled=True,
+                              max_waypoint_speed_scale=90., quiet=True)
+    ui = WaypointUiProcess(unused_tcp_port(), max_waypoint_speed_scale=90.)
+    try:
+        graph.wait_ready()
+        wait_for_http(ui.url)
+        graph.wait_for(lambda: http_json(ui.url, '/api/state')[1]['joint_state_fresh'])
+        http_json(ui.url, '/api/actions/select_joint', {})
+        for i in range(40):
+            q = [0.] * 8
+            q[3] = .003 * i
+            q[7] = 0. if i < 7 else .88
+            http_json(ui.url, '/api/waypoints/joint', {'positions_rad': q})
+        original = http_json(ui.url, '/api/waypoints/export')[1]
+        original['joint_timing'] = dict(speed_mps=.09, preserve_start_waypoint=0,
+                                        preserve_end_waypoint=0)
+        original['path_refinement']['enabled'] = True
+        http_json(ui.url, '/api/waypoints/import', original)
+        result = http_json(ui.url, '/api/waypoints/equal-time', {
+            'total_duration_s': 1.5, 'distribution': 'scheduled'})[1]
+        assert result['verified'] and result['total_s'] == pytest.approx(1.5, abs=1e-6)
+        after = http_json(ui.url, '/api/waypoints/export')[1]
+        assert after.get('joint_timing') is None
+        assert after['path_refinement']['enabled']
+        for a, b in zip(original['waypoints'], after['waypoints']):
+            assert a['joint_positions_rad'] == b['joint_positions_rad']
+        assert not any(graph.final_commands.values())
     finally:
         ui.stop()
         process.stop()

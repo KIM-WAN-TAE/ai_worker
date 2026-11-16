@@ -24,13 +24,17 @@ const id = (name) => d.getElementById(name);
 (async () => {
   verified = { arm: 'right', waypoint_count: 3, waypoints: [{}, {}, {}],
     equal_segment_time_supported: true, equal_total_time_supported: true,
-    uniform_total_time_supported: true, execution: { active: false }, keyboard_control: { active: false },
+    scheduled_total_time_supported: true, uniform_total_time_supported: true, execution: { active: false }, keyboard_control: { active: false },
     joint_timing: { speed_mps: .02, preserve_start_waypoint: 0, preserve_end_waypoint: 0 } };
   api.state.activeArm = 'right'; api.state.data = verified; api.state.armData.right = verified;
   api.renderEqualTimeControls(verified);
   assert.equal(id('equalTimeExcluded').value, '', 'whole-path timing must not produce an invalid 0-0 exclusion');
   assert.equal(id('equalTimeAll').disabled, false);
   api.state.equalTimes.right.seconds = '180';
+  await api.equalizeWaypointTimes(false);
+  assert.deepEqual(posts.shift(), ['/api/waypoints/equal-time', {
+    arm: 'right', excluded_waypoints: [], distribution: 'scheduled', total_duration_s: 180 }]);
+  api.state.equalTimes.right.mode = 'uniform';
   await api.equalizeWaypointTimes(false);
   assert.deepEqual(posts.shift(), ['/api/waypoints/equal-time', {
     arm: 'right', excluded_waypoints: [], distribution: 'uniform', total_duration_s: 180 }]);
@@ -46,11 +50,15 @@ const id = (name) => d.getElementById(name);
   await api.equalizeWaypointTimes(false);
   assert.deepEqual(posts.shift(), ['/api/waypoints/equal-time', {
     arm: 'right', excluded_waypoints: [], duration_s: 1 }]);
-  api.state.equalTimes.right.mode = 'total';
+  api.state.equalTimes.right.mode = 'uniform';
   verified.path_refinement.enabled = false;
   delete verified.uniform_total_time_supported;
   api.renderEqualTimeControls(verified);
   assert.equal(id('equalTimeAll').disabled, true, 'an old server must never silently use equal segment times');
   assert.ok(id('equalTimeResult').textContent.includes('재시작'));
+  api.state.equalTimes.right.mode = 'total';
+  delete verified.scheduled_total_time_supported;
+  api.renderEqualTimeControls(verified);
+  assert.equal(id('equalTimeAll').disabled, true);
   console.log('Uniform timing UI: TCP distribution routing, legacy mode, empty preservation and old-server guard: PASS');
 })().catch(error => { console.error(error); process.exitCode = 1; }).finally(() => dom.window.close());

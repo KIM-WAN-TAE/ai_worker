@@ -64,7 +64,7 @@ def generate_launch_description():
         DeclareLaunchArgument('ui_port', default_value='8765'),
         DeclareLaunchArgument('ui_public_host', default_value=''),
         DeclareLaunchArgument('base_link', default_value='arm_base_link'),
-        # F2 publishes the fixed navigation frame as odom. There is no `world`
+        # F2 and SG2 publish the fixed navigation frame as odom. There is no `world`
         # frame in the live TF tree, so using world would silently lose the
         # mobile base translation and yaw.
         DeclareLaunchArgument('world_frame', default_value='odom'),

@@ -17,7 +17,8 @@ FOLLOWER_MODELS = {
         "label": "SG2",
         "launch": "ffw_sg2_follower_ai.launch.py",
         "bring_down": False,
-        "recover_init": False,
+        "recover_init": True,
+        "recovery_yaml": RECOVERY_PROFILES["sg2"]["config"],
     },
     "bg2": {
         "label": "BG2",
@@ -203,8 +204,8 @@ def gate_paused_pose_move(
         failures.append("설정된 E-stop 감시 토픽의 최신 해제 신호를 확인할 수 없습니다.")
     if state.critical_fault:
         failures.append("로봇 통신 또는 하드웨어 fault가 있습니다.")
-    if state.selected_follower != "f2":
-        failures.append("사용자 초기 위치 이동은 현재 F2에서만 지원됩니다.")
+    if state.selected_follower not in RECOVERY_PROFILES:
+        failures.append("사용자 초기 위치 이동은 현재 F2와 SG2에서 지원됩니다.")
     if not state.follower_up:
         failures.append("Follower control stack이 실행 중이어야 합니다.")
     else:
@@ -266,8 +267,8 @@ def gate_intervention_start(state: SafetyState, inference_phase: str) -> GateRes
             failures.append("Follower /joint_states feedback이 최신 상태가 아닙니다.")
         if not state.dxl_ok:
             failures.append("Follower DXL 통신과 hardware 상태가 정상으로 확인되지 않았습니다.")
-    if state.selected_follower != "f2":
-        failures.append("Intervention은 현재 F2 + A3 조합에서만 지원됩니다.")
+    if state.selected_follower not in RECOVERY_PROFILES:
+        failures.append("Intervention은 현재 F2/SG2와 A3/Mini 조합에서 지원됩니다.")
     if not state.inference_present:
         failures.append("실행 중인 Inference session이 없습니다.")
     if inference_phase != "PAUSED":
@@ -363,8 +364,8 @@ def gate_intervention_preflight(
         failures.append("설정된 E-stop 감시 토픽의 최신 해제 신호를 확인할 수 없습니다.")
     if state.critical_fault:
         failures.append("로봇 통신 또는 하드웨어 fault가 있습니다.")
-    if state.selected_follower != "f2":
-        failures.append("Intervention은 현재 F2에서만 지원됩니다.")
+    if state.selected_follower not in RECOVERY_PROFILES:
+        failures.append("Intervention은 현재 F2와 SG2에서 지원됩니다.")
     if not state.follower_up:
         failures.append("Follower가 실행 중이어야 합니다.")
     elif not (state.controllers_ready and state.feedback_fresh and state.dxl_ok):
@@ -423,8 +424,8 @@ def gate_leader_standby_start(
         failures.append("설정된 E-stop 감시 토픽의 최신 해제 신호를 확인할 수 없습니다.")
     if state.critical_fault:
         failures.append("로봇 통신 또는 하드웨어 fault가 있습니다.")
-    if state.selected_follower != "f2":
-        failures.append("Leader standby는 현재 F2에서만 지원됩니다.")
+    if state.selected_follower not in RECOVERY_PROFILES:
+        failures.append("Leader standby는 현재 F2와 SG2에서 지원됩니다.")
     if not state.follower_up:
         failures.append("Follower가 실행 중이어야 합니다.")
     elif not (state.controllers_ready and state.feedback_fresh and state.dxl_ok):
@@ -527,8 +528,8 @@ def gate_action(action: str, state: SafetyState) -> GateResult:
 
     elif action in {"bring_down", "recover_init"}:
         label = "Bring-down" if action == "bring_down" else "Init pose 복구"
-        if state.selected_follower != "f2":
-            failures.append(f"{label}는 현재 F2에서만 지원됩니다.")
+        if not FOLLOWER_MODELS.get(state.selected_follower, {}).get(action):
+            failures.append(f"선택한 모델은 {label}를 지원하지 않습니다.")
         if not state.follower_up:
             failures.append("Follower control stack이 실행 중이어야 합니다.")
         if state.leader_up or state.leader_stream_active:

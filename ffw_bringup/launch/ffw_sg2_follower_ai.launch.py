@@ -330,6 +330,24 @@ def generate_launch_description():
         condition=IfCondition(use_head_eef_tracker),
     )
 
+    # Sole publisher to the final SG2 arm-controller input topics. Policy and
+    # A3 streams stay isolated until one source is selected explicitly.
+    command_source_arbiter_node = Node(
+        package='ffw_bringup',
+        executable='command_source_arbiter',
+        name='command_source_arbiter',
+        output='screen',
+        # The Intervention controller owns the safety lease and s6 lifecycle.
+        # The arbiter only owns command routing and readiness validation.
+        parameters=[{
+            'manage_leader_service': False,
+            'robot_model': 'sg2',
+            # Allow the standard GR00T sync path to bridge one TensorRT
+            # inference interval while retaining fail-closed source expiry.
+            'max_source_age_s': 0.60,
+        }],
+    )
+
     dual_laser_merger_node = Node(
         package='dual_laser_merger',
         executable='dual_laser_merger_node',
@@ -372,6 +390,7 @@ def generate_launch_description():
             lidar_timer_20s,
             lidar_timer_10s,
             head_eef_tracker_node,
+            command_source_arbiter_node,
             dual_laser_merger_node,
         ]
     )

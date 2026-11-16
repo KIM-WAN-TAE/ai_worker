@@ -31,27 +31,49 @@ template<typename MsgT>
 class TopicWatchdog {
 public:
   using TimeoutCallback = std::function<void()>;
+  using HealthCheck = std::function<bool(const MsgT &)>;
 
   TopicWatchdog(
     rclcpp_lifecycle::LifecycleNode * node,
     const std::string & topic_name,
     std::chrono::milliseconds timeout,
-    TimeoutCallback on_timeout_cb)
+    TimeoutCallback on_timeout_cb,
+    TimeoutCallback on_recovered_cb = {},
+    HealthCheck is_healthy = {})
   : node_(node),
     topic_name_(topic_name),
     timeout_(timeout),
-    on_timeout_cb_(on_timeout_cb)
+    on_timeout_cb_(on_timeout_cb),
+    on_recovered_cb_(on_recovered_cb),
+    is_healthy_(is_healthy)
   {
     sub_ = node_->create_subscription<MsgT>(
       topic_name_, 10,
-      [this](const typename MsgT::SharedPtr /*msg*/) {
-        last_msg_time_ = node_->now();
-        timed_out_ = false;
+      [this](const typename MsgT::SharedPtr msg) {
+        const auto now = std::chrono::steady_clock::now();
+        if (is_healthy_ && !is_healthy_(*msg)) {
+          healthy_since_ = {};
+          return;
+        }
+        if (now - last_msg_time_ > timeout_) {
+          healthy_since_ = {};
+        }
+        last_msg_time_ = now;
+        if (timed_out_) {
+          if (healthy_since_ == std::chrono::steady_clock::time_point{}) {
+            healthy_since_ = now;
+          }
+          // A single packet must not clear an intermittent communication fault.
+          if (now - healthy_since_ >= std::chrono::seconds(2)) {
+            timed_out_ = false;
+            if (on_recovered_cb_) {on_recovered_cb_();}
+          }
+        }
       });
     timer_ = node_->create_wall_timer(
       std::chrono::milliseconds(50),
       std::bind(&TopicWatchdog::check_timeout, this));
-    last_msg_time_ = node_->now();
+    last_msg_time_ = std::chrono::steady_clock::now();
   }
 
   bool is_timed_out() const {return timed_out_;}
@@ -59,8 +81,9 @@ public:
 private:
   void check_timeout()
   {
-    auto now = node_->now();
-    if ((now - last_msg_time_).nanoseconds() > timeout_.count() * 1'000'000) {
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last_msg_time_ > timeout_) {
+      healthy_since_ = {};
       if (!timed_out_) {
         timed_out_ = true;
         if (on_timeout_cb_) {on_timeout_cb_();}
@@ -72,9 +95,12 @@ private:
   std::string topic_name_;
   std::chrono::milliseconds timeout_;
   TimeoutCallback on_timeout_cb_;
+  TimeoutCallback on_recovered_cb_;
+  HealthCheck is_healthy_;
   typename rclcpp::Subscription<MsgT>::SharedPtr sub_;
   rclcpp::TimerBase::SharedPtr timer_;
-  rclcpp::Time last_msg_time_;
+  std::chrono::steady_clock::time_point last_msg_time_;
+  std::chrono::steady_clock::time_point healthy_since_{};
   bool timed_out_ = false;
 };
 

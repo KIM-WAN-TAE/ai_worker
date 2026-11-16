@@ -16,14 +16,30 @@ def main():
     loader.exec_module(ui)
     config = json.loads(sys.stdin.readline())
     assert config['type'] == 'init'
+    if config.get('stream_protocol_version') != ui.STREAM_PROTOCOL_VERSION:
+        print(json.dumps({'type': 'error', 'message':
+              'UI가 업데이트되었습니다. 웨이포인트 UI를 다시 시작해 주세요.'}), flush=True)
+        return
     ui.rclpy.init(args=[])
     node = ui.Node(f'waypoint_stream_worker_{os.getpid()}')
     bridge = object.__new__(ui.WaypointUiBridge)
+    bridge.robot_description_xml = config['robot_description']
+    # Reject missing/malformed limits before creating any command publishers.
+    for arm in ui.ARMS:
+        bridge._position_limits(arm)
+        bridge._velocity_limits(arm)
     bridge.lock = threading.RLock()
     bridge.execution_stop = threading.Event()
     bridge.control_rate_hz = float(config['control_rate_hz'])
+    bridge.joint_speed_radps = float(config['joint_speed_radps'])
+    bridge.gripper_speed_radps = float(config['gripper_speed_radps'])
     bridge.max_joint_step_rad = float(config['max_joint_step_rad'])
     bridge.max_schedule_lag_s = float(config['max_schedule_lag_s'])
+    if (not 0.0 < bridge.control_rate_hz <= 100.0 or any(
+            not ui.math.isfinite(v) or v <= 0.0 for v in (
+                bridge.joint_speed_radps, bridge.gripper_speed_radps,
+                bridge.max_joint_step_rad, bridge.max_schedule_lag_s))):
+        raise ValueError('Invalid waypoint streaming rate or motion limits')
     bridge.arbiter_mode = 'UNKNOWN'
     bridge.arbiter_fault = ''
     bridge.waypoint_command_publishers = {
@@ -181,36 +197,32 @@ def main():
             last_progress[0] = None
             trajectory = ui.JointTrajectory()
             trajectory.joint_names = ui.command_joint_names(arm)
-            previous = None
-            previous_time = 0.0
             for stamp, positions in plan['points']:
-                bridge._validate_arm_command(arm, positions)
-                assert stamp > previous_time, 'trajectory time must increase'
-                if previous is not None:
-                    assert max(abs(a-b) for a,b in zip(previous,positions)) <= bridge.max_joint_step_rad + 1e-9
                 point = ui.JointTrajectoryPoint()
                 point.positions = positions
                 ticks = round(stamp * 1e9)
                 point.time_from_start.sec = ticks // 1_000_000_000
                 point.time_from_start.nanosec = ticks % 1_000_000_000
                 trajectory.points.append(point)
-                previous, previous_time = positions, stamp
-            assert trajectory.points
             bridge._validate_command_pair(plan['initial_pair'])
+            bridge._validate_trajectory(arm, trajectory, plan['initial_pair'][arm])
+            duration_s = bridge._stream_duration_s(
+                arm, trajectory, plan['initial_pair'][arm], plan.get('start_speed_scale', 1.0))
             deadline = time.monotonic() + 2.0
             while bridge.arbiter_mode != 'WAYPOINT' or bridge.arbiter_fault:
                 if bridge.arbiter_fault or time.monotonic() > deadline:
                     raise RuntimeError(f'WAYPOINT 제어권이 해제되었습니다: {bridge.arbiter_mode}, {bridge.arbiter_fault}')
                 if bridge.execution_stop.wait(0.01):
                     break
-            report({'type': 'prepared'})
+            report({'type': 'prepared', 'duration_s': duration_s})
             while not go.wait(0.01):
                 if bridge.execution_stop.is_set():
                     break
             if bridge.execution_stop.is_set():
                 break
-            stop_hold()
-            final_pair = bridge._stream_trajectory_local(arm, trajectory, plan['initial_pair'])
+            final_pair = bridge._stream_trajectory_local(
+                arm, trajectory, plan['initial_pair'], before_stream=stop_hold,
+                start_speed_scale=plan.get('start_speed_scale', 1.0))
             start_hold(final_pair)
             report({'type': 'done', 'final_pair': final_pair, 'progress': last_progress[0],
                     'publication': dict(publication)})

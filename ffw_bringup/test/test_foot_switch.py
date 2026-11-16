@@ -58,7 +58,7 @@ def test_key_release_does_not_retrigger_save_pose():
     reader.right_enable_pub.publish.assert_not_called()
 
 
-def test_a3_disables_navigation_and_auxiliary_joint_jog():
+def test_a3_enables_recordable_commands_with_mobile_pedal_gate():
     config_path = (
         Path(__file__).resolve().parents[1]
         / "config"
@@ -69,5 +69,7 @@ def test_a3_disables_navigation_and_auxiliary_joint_jog():
     params = config["/**"]["joystick_controller"]["ros__parameters"]
 
     assert params["enable_joystick_update"] is True
-    assert params["enable_joint_jog_update"] is False
-    assert params["enable_cmd_vel_update"] is False
+    assert params["enable_joint_jog_update"] is True
+    assert params["enable_cmd_vel_update"] is True
+    assert params["require_middle_pedal_for_cmd_vel"] is True
+    assert params["middle_pedal_timeout_sec"] > 0

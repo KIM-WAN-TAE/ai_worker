@@ -66,6 +66,8 @@ controller_interface::CallbackReturn FfwRobotManager::on_configure(
   gpio_interface_indices_.clear();
   torque_disabled_ = false;
   led_error_set_ = false;
+  watchdog_error_.store(false);
+  watchdog_led_error_ = false;
 
   // Create service client for Dynamixel torque control
   torque_client_ =
@@ -121,12 +123,17 @@ controller_interface::CallbackReturn FfwRobotManager::on_activate(
   }
   gpio_names_.assign(found_gpios.begin(), found_gpios.end());
   std::sort(gpio_names_.begin(), gpio_names_.end());
+  battery_samples_active_.store(true);
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
 controller_interface::CallbackReturn FfwRobotManager::on_deactivate(
   const rclcpp_lifecycle::State & /*previous_state*/)
 {
+  battery_samples_active_.store(false);
+  for (auto & voltage : battery_voltages_) {
+    voltage->store(std::numeric_limits<double>::quiet_NaN());
+  }
   gpio_names_.clear();
   gpio_interface_indices_.clear();
 
@@ -198,6 +205,17 @@ controller_interface::return_type FfwRobotManager::update(
         set_led_error_state();
       }
     }
+  }
+
+  // Recover only a transient watchdog indication. Hardware faults and torque
+  // shutdown remain latched and require explicit operator recovery.
+  if (watchdog_error_.load()) {
+    if (!watchdog_led_error_) {
+      watchdog_led_error_ = set_led_color(255, 0, 0, LedMode::RGB_BLINK);
+    }
+  } else if (watchdog_led_error_ && !led_error_set_ && !torque_disabled_) {
+    reset_led_state();
+    watchdog_led_error_ = false;
   }
 
   // Update battery states if monitoring is enabled
@@ -346,14 +364,29 @@ void FfwRobotManager::setup_watchdogs()
     "/ffw_follower/dxl_state",
     std::chrono::milliseconds(500),
     [this]() {
-      // Set LED to red (solid) on timeout
-      set_led_color(255, 0, 0, LedMode::RGB_BLINK);
+      watchdog_error_.store(true);
+      RCLCPP_WARN(get_node()->get_logger(),
+        "Follower state missing or unhealthy for 500 ms; setting watchdog LED warning.");
+    },
+    [this]() {
+      watchdog_error_.store(false);
+      RCLCPP_INFO(get_node()->get_logger(),
+        "Follower state healthy for 2 s; clearing watchdog-only LED warning.");
+    },
+    [](const dynamixel_interfaces::msg::DynamixelState & msg) {
+      return msg.comm_state == 0 && !msg.id.empty() &&
+             msg.id.size() == msg.dxl_hw_state.size() &&
+             std::all_of(msg.dxl_hw_state.begin(), msg.dxl_hw_state.end(),
+        [](int32_t status) {return status == 0;});
     }
   );
 }
 
 void FfwRobotManager::setup_battery_monitoring()
 {
+  battery_publish_timer_.reset();
+  battery_samples_active_.store(false);
+  battery_voltages_.clear();
   // Create robot type configuration
   robot_type_ = create_robot_type(params_.ffw_type);
   if (!robot_type_) {
@@ -375,10 +408,15 @@ void FfwRobotManager::setup_battery_monitoring()
       auto publisher = get_node()->create_publisher<sensor_msgs::msg::BatteryState>(
         battery_config.topic_name, 10);
       battery_publishers_.push_back(publisher);
+      battery_voltages_.push_back(std::make_unique<std::atomic<double>>(
+        std::numeric_limits<double>::quiet_NaN()));
 
       RCLCPP_INFO(get_node()->get_logger(), "Created battery publisher for %s at %s",
                   battery_config.name.c_str(), battery_config.topic_name.c_str());
     }
+
+    battery_publish_timer_ = get_node()->create_wall_timer(
+      std::chrono::milliseconds(100), [this]() {publish_battery_states();});
 
     RCLCPP_INFO(get_node()->get_logger(),
                 "Battery monitoring enabled for %s with %zu batteries and model: %s",
@@ -394,22 +432,32 @@ void FfwRobotManager::setup_battery_monitoring()
 
 void FfwRobotManager::update_battery_states()
 {
+  static_assert(std::atomic<double>::is_always_lock_free,
+    "Battery samples must not block the control thread");
   if (!battery_monitoring_enabled_) {
     return;
   }
 
-  // Update all batteries dynamically
+  // No message creation, voltage-to-SOC calculation, or ROS publish on this thread.
+  for (size_t i = 0; i < battery_configurations_.size(); ++i) {
+    const size_t index = battery_configurations_[i].voltage_index;
+    double voltage = std::numeric_limits<double>::quiet_NaN();
+    if (index != std::numeric_limits<size_t>::max() && index < state_interfaces_.size()) {
+      voltage = state_interfaces_[index].get_optional().value_or(voltage);
+    }
+    battery_voltages_[i]->store(voltage, std::memory_order_relaxed);
+  }
+}
+
+void FfwRobotManager::publish_battery_states()
+{
+  if (!battery_samples_active_.load()) {return;}
   for (size_t i = 0; i < battery_configurations_.size() && i < battery_publishers_.size(); ++i) {
     const auto & battery_config = battery_configurations_[i];
     auto & publisher = battery_publishers_[i];
 
-    // Check if voltage index is valid (allow 0; ignore unset sentinel SIZE_MAX)
-    if (battery_config.voltage_index != std::numeric_limits<size_t>::max() &&
-      battery_config.voltage_index < state_interfaces_.size())
-    {
-      auto voltage_opt = state_interfaces_[battery_config.voltage_index].get_optional();
-      if (voltage_opt.has_value()) {
-        double voltage = voltage_opt.value();
+    const double voltage = battery_voltages_[i]->load(std::memory_order_relaxed);
+    if (std::isfinite(voltage)) {
         double soc_fraction = robot_type_->get_battery_model()->voltage_to_soc(voltage);
         // Prefer explicit frame_id from BatteryInfo when provided; otherwise derive
         const std::string frame_id = !battery_config.frame_id.empty() ?
@@ -419,7 +467,6 @@ void FfwRobotManager::update_battery_states()
           std::string("battery_") + battery_config.interface_name);
         auto battery_state = create_battery_state(voltage, soc_fraction, frame_id);
         publisher->publish(battery_state);
-      }
     }
   }
 }

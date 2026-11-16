@@ -1,6 +1,8 @@
 import math
 from types import SimpleNamespace
 
+import pytest
+
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 from ffw_bringup.command_source_arbiter import (
@@ -325,6 +327,39 @@ def test_active_pair_skew_grace_resets_when_pair_recovers():
     )
     assert core.watchdog(1.12) == (True, "ready")
     assert core._pair_skew_started_s is None
+
+
+@pytest.mark.parametrize("mode", [MODE_POLICY, MODE_TELEOP, MODE_WAYPOINT])
+def test_pair_recovery_between_watchdog_ticks_breaks_skew_continuity(mode):
+    core = CommandSourceArbiterCore(JOINTS, max_age_s=0.5, max_pair_skew_s=0.05)
+    ready_pair(core, mode)
+    assert core.select(mode, 1.02)[0]
+
+    # The watchdog runs between the two callbacks for this action tick.
+    core.update(mode, "left", trajectory(JOINTS["left"], [0.1, 0.2]), 1.10)
+    assert core.watchdog(1.10) == (True, "arm pair skew grace")
+    # The pair recovers, but no watchdog tick occurs until the next action.
+    core.update(mode, "right", trajectory(JOINTS["right"], [0.3, 0.4]), 1.108)
+    core.update(mode, "left", trajectory(JOINTS["left"], [0.1, 0.2]), 1.167)
+    # Before the fix this reports skew 0.059s "for 0.067s" and latches.
+    assert core.watchdog(1.167) == (True, "arm pair skew grace")
+    assert core.mode == mode
+    assert not core.fault
+    core.update(mode, "right", trajectory(JOINTS["right"], [0.3, 0.4]), 1.175)
+    assert core.watchdog(1.18) == (True, "ready")
+
+
+def test_inactive_source_recovery_does_not_hide_active_pair_failure():
+    core = CommandSourceArbiterCore(JOINTS, max_age_s=0.5, max_pair_skew_s=0.05)
+    ready_pair(core, MODE_POLICY)
+    assert core.select(MODE_POLICY, 1.02)[0]
+    core.update(MODE_POLICY, "left", trajectory(JOINTS["left"], [0.1, 0.2]), 1.10)
+    assert core.watchdog(1.10)[0]
+    ready_pair(core, MODE_TELEOP, now=1.12)
+    ok, reason = core.watchdog(1.167)
+    assert not ok
+    assert "arm pair skew" in reason
+    assert core.mode == MODE_NONE
 
 
 def test_prepare_intervention_does_not_clear_a_latched_fault():

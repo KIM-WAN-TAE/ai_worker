@@ -16,7 +16,11 @@ if [ "${LEADER_TYPE}" = "a3" ]; then
     # This keeps the save-pose shortcut without the former startup edge.
     ROS2_COMMAND="ros2 launch ffw_bringup ffw_a3_ai.launch.py launch_gripper_trigger:=true"
 elif [ "${LEADER_TYPE}" = "mini" ]; then
-    ROS2_COMMAND="ros2 launch ffw_bringup ffw_lg2_mini_leader_ai.launch.py"
+    if [ "${MINI_TELEOP_BACKEND:-official}" = "legacy" ]; then
+        ROS2_COMMAND="ros2 launch ffw_bringup ffw_lg2_mini_leader_ai.launch.py"
+    else
+        ROS2_COMMAND="bash /root/ros2_ws/src/ai_worker/official_relative_teleop/scripts/run_mini.sh"
+    fi
 elif [ "${LEADER_TYPE}" = "a2" ]; then
     ROS2_COMMAND="ros2 launch ffw_bringup ffw_a2_ai.launch.py"
 elif [ "${LEADER_TYPE}" = "lg2" ]; then

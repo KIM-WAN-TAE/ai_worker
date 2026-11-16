@@ -791,7 +791,7 @@ class BringupMonitor(Node):
         if (op.get("started_age") or 0.0) > 60.0:
             operation.cancel("자세 이동 전체 timeout")
             return
-        if op.get("kind") == "F2 사용자 초기 위치 이동":
+        if op.get("kind") in {"F2 사용자 초기 위치 이동", "SG2 사용자 초기 위치 이동"}:
             inference = ros["inference"]
             arbiter = ros["arbiter"]
             recording = ros["recording"]
@@ -825,7 +825,7 @@ class InterventionRequest(BaseModel):
 
 
 class PoseMoveRequest(BaseModel):
-    model: str = "f2"
+    model: str
     left_arm: list[float]
     right_arm: list[float]
     head: list[float]
@@ -891,7 +891,7 @@ app = FastAPI(title="AI Worker Intervention Controller")
 
 
 def selected_models() -> tuple[str, str]:
-    return read_selected(ROBOT_TYPE_FILE, "f2"), read_selected(LEADER_TYPE_FILE, "a3")
+    return read_selected(ROBOT_TYPE_FILE, "sg2"), read_selected(LEADER_TYPE_FILE, "a3")
 
 
 def build_snapshot() -> dict[str, Any]:
@@ -1724,11 +1724,11 @@ def move_to_operator_pose(
     x_control_token: str | None = Header(default=None),
     x_control_client: str | None = Header(default=None),
 ) -> dict[str, Any]:
-    """Move F2 to validated operator-entered whole-body joint lists."""
+    """Move a supported follower to validated whole-body joint lists."""
     authorize("recover_init", x_control_token)
     model = body.model.strip().lower()
-    if model != "f2":
-        raise HTTPException(400, "사용자 초기 위치 이동은 현재 F2에서만 지원됩니다.")
+    if not FOLLOWER_MODELS.get(model, {}).get("recover_init"):
+        raise HTTPException(400, "사용자 초기 위치 이동은 F2와 SG2에서 지원됩니다.")
 
     targets = {
         "left_arm": body.left_arm,
@@ -1759,6 +1759,8 @@ def move_to_operator_pose(
     error = ""
     try:
         snapshot = build_snapshot()
+        if model != snapshot["selected"]["follower"]:
+            raise HTTPException(409, "요청 모델이 현재 Follower 모델과 일치하지 않습니다.")
         gate = paused_pose_move_gate(snapshot)
         if not gate["ok"]:
             raise HTTPException(409, {
@@ -1768,7 +1770,7 @@ def move_to_operator_pose(
         coordinator.announce("custom_pose_move", actor, model)
         announced = True
         operation.start(
-            "F2 사용자 초기 위치 이동",
+            f"{model.upper()} 사용자 초기 위치 이동",
             [
                 "python3",
                 str(ROOT / "recovery_runner.py"),

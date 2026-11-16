@@ -33,12 +33,12 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'left_trajectory_output_topic',
-            default_value='joint_trajectory_command_broadcaster_left/joint_trajectory',
+            default_value='/intervention/teleop/arm_left',
             description='Left leader output; command arbitration may route it as teleop.',
         ),
         DeclareLaunchArgument(
             'right_trajectory_output_topic',
-            default_value='joint_trajectory_command_broadcaster_right/joint_trajectory',
+            default_value='/intervention/teleop/arm_right',
             description='Right leader output; command arbitration may route it as teleop.',
         ),
         DeclareLaunchArgument(

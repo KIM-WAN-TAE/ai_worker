@@ -1,3 +1,4 @@
+
 // Copyright 2021 ros2_control development team
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -241,6 +242,7 @@ controller_interface::CallbackReturn JointTrajectoryCommandBroadcaster::on_confi
         group_reverse_joints_[group_name] = params_.left_reverse_joints;
       } else if (group_name == "right" && !params_.right_reverse_joints.empty()) {
         group_reverse_joints_[group_name] = params_.right_reverse_joints;
+
       } else {
         // Initialize empty reverse joints if not provided
         group_reverse_joints_[group_name] = std::vector<std::string>();

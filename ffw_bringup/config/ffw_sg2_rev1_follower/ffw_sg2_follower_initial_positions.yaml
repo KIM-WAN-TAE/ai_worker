@@ -1,3 +1,4 @@
+# SG2 startup pose adopted from the F2 profile; joint limits verified offline.
 /**:
   arm_l_joint_trajectory_executor:
     ros__parameters:
@@ -10,8 +11,10 @@
         - arm_l_joint6
         - arm_l_joint7
         - gripper_l_joint1
-      step_names: [home]
-      home: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+      step_names: [step0, step1]
+      step0: [1.57, 0.0, 0.0, -2.8, 0.0, 0.0, 0.0, 0.0]
+
+      step1: [-0.4070131, 1.2642549, -0.9498553, -2.1042478, 1.3092345, 0.1696717, 0.7431066, 0.1]
       duration: 5.0
       position_tolerance: 0.1
       velocity_tolerance: 0.01
@@ -30,8 +33,10 @@
         - arm_r_joint6
         - arm_r_joint7
         - gripper_r_joint1
-      step_names: [home]
-      home: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+      step_names: [step0, step1]
+      step0: [1.57, 0.0, 0.0, -2.8, 0.0, 0.0, 0.0, 0.0]
+      step1: [0.206799784966833, -0.7173517343848337, 0.32757680356301655, -2.0146680488394932, -0.42941874680873665, -0.3036203379772087, -0.5987694600634532, 0.019]
+
       duration: 5.0
       position_tolerance: 0.1
       velocity_tolerance: 0.01
@@ -45,7 +50,7 @@
         - head_joint1
         - head_joint2
       step_names: [home]
-      home: [0.0, 0.0]
+      home: [0.75, 0.0]
       duration: 5.0
       position_tolerance: 0.1
       velocity_tolerance: 0.01
@@ -57,8 +62,9 @@
     ros__parameters:
       joint_names:
         - lift_joint
-      step_names: [home]
-      home: [0.0]
+      step_names: [step0, step1]
+      step0: [0.0]
+      step1: [-0.22]
       duration: 10.0
       position_tolerance: 0.1
       velocity_tolerance: 0.01

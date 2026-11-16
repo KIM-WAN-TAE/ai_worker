@@ -48,10 +48,11 @@ class SafetyGateTest(unittest.TestCase):
         )
         self.assertEqual(set(LEADER_MODELS), {"a3", "mini", "a2", "lg2"})
 
-    def test_only_f2_exposes_recovery_profile(self):
+    def test_f2_and_sg2_expose_recovery_profiles(self):
         self.assertTrue(FOLLOWER_MODELS["f2"]["recover_init"])
         self.assertTrue(FOLLOWER_MODELS["f2"]["recovery_yaml"].endswith("f2_follower_initial_positions.yaml"))
-        self.assertFalse(FOLLOWER_MODELS["sg2"]["recover_init"])
+        self.assertTrue(FOLLOWER_MODELS["sg2"]["recover_init"])
+        self.assertFalse(FOLLOWER_MODELS["sg2"]["bring_down"])
 
     def healthy_f2(self, **overrides):
         values = dict(
@@ -224,13 +225,13 @@ class SafetyGateTest(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertTrue(any("최근 trajectory" in item for item in result.failures))
 
-    def test_intervention_is_limited_to_validated_f2_profile(self):
+    def test_intervention_rejects_unvalidated_profile(self):
         result = gate_intervention_start(
-            self.healthy_f2(inference_present=True, selected_follower="sg2"),
+            self.healthy_f2(inference_present=True, selected_follower="bg2"),
             "PAUSED",
         )
         self.assertFalse(result.ok)
-        self.assertTrue(any("F2 + A3" in item for item in result.failures))
+        self.assertTrue(any("F2/SG2" in item for item in result.failures))
 
     def test_faulted_intervention_can_reset_only_after_outputs_are_quiet(self):
         allowed = gate_intervention_reset(
@@ -447,9 +448,9 @@ class RecoveryConfigTest(unittest.TestCase):
         self.assertEqual([step.name for step in head.steps], ["home"])
         self.assertNotIn("swerve", " ".join(group.executor_name for group in groups))
 
-    def test_unimplemented_sg2_recovery_is_rejected(self):
+    def test_unimplemented_bg2_recovery_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "지원하지 않는 복구 모델"):
-            load_recovery_groups("sg2")
+            load_recovery_groups("bg2")
 
 
 class OperatingModeTest(unittest.TestCase):

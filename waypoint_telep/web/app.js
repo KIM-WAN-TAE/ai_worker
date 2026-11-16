@@ -977,7 +977,7 @@ async function loadRobotModel() {
       if (!window.FullRobotSimulator) throw new Error('전체 로봇 WebGL bundle을 불러오지 못했습니다.');
       if (!state.simulator.fullViewer) {
         state.simulator.fullViewerLoading = true;
-        badge.textContent = 'F2 mesh 로딩 중'; badge.className = 'status-chip waiting';
+        badge.textContent = '로봇 mesh 로딩 중'; badge.className = 'status-chip waiting';
         byId('modelMeta').textContent = `${model.robot_name} 전체 URDF·STL mesh를 불러오는 중입니다.`;
         const viewer = new window.FullRobotSimulator(byId('robotSimulation'));
         const assetOrigin = window.location.origin;
@@ -991,7 +991,7 @@ async function loadRobotModel() {
         state.simulator.fullViewer = viewer;
         state.simulator.fullViewerLoading = false;
       }
-      badge.textContent = '전체 F2 준비됨'; badge.className = 'status-chip ready';
+      badge.textContent = '전체 로봇 준비됨'; badge.className = 'status-chip ready';
       byId('modelMeta').textContent = `${model.robot_name} 전체 모델 · 양팔 live joint state + 좌·우 trajectory`;
       byId('simulationEmpty').style.display = 'none';
       if (state.data) renderPosePanels(state.data);
@@ -1005,7 +1005,7 @@ async function loadRobotModel() {
     state.simulator.fullViewerLoading = false;
     byId('modelBadge').textContent = '전체 모델 오류';
     byId('modelBadge').className = 'status-chip waiting';
-    byId('modelMeta').textContent = `전체 F2 모델 로드 실패: ${error.message}`;
+    byId('modelMeta').textContent = `전체 로봇 모델 로드 실패: ${error.message}`;
   }
   window.setTimeout(loadRobotModel, 900);
 }
@@ -1093,7 +1093,7 @@ function renderState(data) {
   byId('waypointListTitle').textContent = `${armLabel} 다중 waypoint 목록`;
   byId('trajectoryTitle').textContent = `${armLabel} 관절 경로`;
   byId('execute').textContent = `${armLabel}만 실제 실행`;
-  byId('executeSlowStart').textContent = `${armLabel} 저속 시작 후 실행`;
+  byId('executeSlowStart').textContent = `${armLabel} 시작점만 저속 정렬 후 실행`;
   document.querySelectorAll('.arm-tab').forEach((button) => {
     button.classList.toggle('active', button.dataset.arm === data.arm);
   });
@@ -2264,7 +2264,7 @@ byId('execute').addEventListener('click', () => {
   runAction('execute', { confirm: 'EXECUTE' }).catch(() => {});
 });
 byId('executeSlowStart').addEventListener('click', () => {
-  if (!window.confirm('현재 자세에서 선택한 시작 waypoint까지 저속으로 정렬한 뒤 나머지 경로를 실행합니다. 계속하시겠습니까?')) return;
+  if (!window.confirm('현재 자세에서 첫 waypoint까지만 저속으로 정렬합니다. 이후 경로는 저장된 속도로 실행됩니다. 계속하시겠습니까?')) return;
   runAction('execute_slow_start', { confirm: 'EXECUTE' }).catch(() => {});
 });
 byId('executeConsent').addEventListener('change', (event) => {
@@ -2296,8 +2296,9 @@ function equalTimeFingerprint(data) {
 function renderEqualTimeControls(data) {
   byId('equalTimePanel').hidden = !data.equal_segment_time_supported || !data.equal_total_time_supported;
   const draft = state.equalTimes[data.arm];
-  const totalMode = draft.mode === 'total';
-  const needsCombinedUpgrade = totalMode && data.path_refinement?.enabled && !data.uniform_refinement_supported;
+  const totalMode = draft.mode !== 'segment';
+  const uniformMode = draft.mode === 'uniform';
+  const needsCombinedUpgrade = uniformMode && data.path_refinement?.enabled && !data.uniform_refinement_supported;
   byId('equalTimeMode').value = draft.mode;
   byId('equalTimeSecondsLabel').textContent = totalMode ? '전체 목표시간 (초)' : '구간당 시간 (초)';
   byId('equalTimeSeconds').placeholder = totalMode ? '예: 180' : '비우면 자동 계산';
@@ -2314,7 +2315,8 @@ function renderEqualTimeControls(data) {
   ['equalTimeAll', 'equalTimeExcept', 'equalTimeSeconds', 'equalTimeExcluded', 'equalTimeMode'].forEach((id) => {
     byId(id).disabled = disabled;
   });
-  if (totalMode && (!data.uniform_total_time_supported || needsCombinedUpgrade)) {
+  if ((uniformMode && (!data.uniform_total_time_supported || needsCombinedUpgrade))
+      || (draft.mode === 'total' && !data.scheduled_total_time_supported)) {
     byId('equalTimeAll').disabled = true;
     byId('equalTimeExcept').disabled = true;
   }
@@ -2324,7 +2326,8 @@ function renderEqualTimeControls(data) {
     && draft.result.fingerprint !== equalTimeFingerprint(data);
   result.textContent = state.equalTimeBusy ? '시간 계산 및 궤적 검증 중…'
     : needsCombinedUpgrade ? '부드럽게 연결과 목표시간을 함께 쓰려면 waypoint UI와 양팔 노드를 새 버전으로 재시작해 주세요.'
-    : totalMode && !data.uniform_total_time_supported ? '끝단 등속 배정을 사용하려면 waypoint UI와 양팔 노드를 새 버전으로 재시작해 주세요.'
+    : draft.mode === 'total' && !data.scheduled_total_time_supported ? '실행 시간 배정을 사용하려면 waypoint UI와 양팔 노드를 새 버전으로 재시작해 주세요.'
+    : uniformMode && !data.uniform_total_time_supported ? '끝단 등속 배정을 사용하려면 waypoint UI와 양팔 노드를 새 버전으로 재시작해 주세요.'
     : outdated ? '경로 또는 속도 설정이 변경되었습니다. 다시 적용해 검증해 주세요.'
       : draft.result?.message || '시간 배정 후 검증 결과가 여기에 표시됩니다.';
   result.classList.toggle('error', Boolean(draft.result?.error) || Boolean(outdated));
@@ -2354,7 +2357,7 @@ async function equalizeWaypointTimes(excludeSelected) {
   try {
     const seconds = draft.seconds.trim() === '' ? 0 : Number(draft.seconds);
     if (!Number.isFinite(seconds) || seconds < 0) throw new Error('이동시간은 0 이상의 숫자로 입력해 주세요.');
-    if (draft.mode === 'total' && seconds <= 0) throw new Error('전체 목표시간을 0보다 큰 초 단위 숫자로 입력해 주세요.');
+    if (draft.mode !== 'segment' && seconds <= 0) throw new Error('전체 목표시간을 0보다 큰 초 단위 숫자로 입력해 주세요.');
     const excluded = excludeSelected
       ? parseExcludedWaypointNumbers(draft.excluded || '', state.armData[arm].waypoint_count) : [];
     state.equalTimeBusy = true;
@@ -2362,8 +2365,8 @@ async function equalizeWaypointTimes(excludeSelected) {
     renderEqualTimeControls(state.data);
     const result = await request('/api/waypoints/equal-time', {
       method: 'POST', body: JSON.stringify({ arm, excluded_waypoints: excluded,
-        ...(draft.mode === 'total' ? { distribution: 'uniform' } : {}),
-        [draft.mode === 'total' ? 'total_duration_s' : 'duration_s']: seconds }),
+        ...(draft.mode !== 'segment' ? { distribution: draft.mode === 'uniform' ? 'uniform' : 'scheduled' } : {}),
+        [draft.mode !== 'segment' ? 'total_duration_s' : 'duration_s']: seconds }),
     });
     state.speedDrafts[arm] = {};
     // Periodic runtime refreshes can supersede a full refresh while it awaits

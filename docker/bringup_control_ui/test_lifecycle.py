@@ -172,13 +172,16 @@ class InterventionLifecycleTest(unittest.TestCase):
         self.assertNotIn("_enable_leader_arms", select_body)
 
     def test_intervention_controller_owns_leader_lifecycle(self):
-        launch = (
-            DOCKER.parent
-            / "ffw_bringup"
-            / "launch"
-            / "f2_follower_ai.launch.py"
-        ).read_text(encoding="utf-8")
-        self.assertIn("parameters=[{'manage_leader_service': False}]", launch)
+        import ast
+        for name in ("f2_follower_ai.launch.py", "ffw_sg2_follower_ai.launch.py"):
+            tree = ast.parse((DOCKER.parent / "ffw_bringup" / "launch" / name).read_text())
+            nodes = [node.value for node in ast.walk(tree)
+                     if isinstance(node, ast.Assign)
+                     and any(isinstance(t, ast.Name) and t.id == "command_source_arbiter_node"
+                             for t in node.targets)]
+            self.assertEqual(len(nodes), 1, name)
+            params = next(k.value for k in nodes[0].keywords if k.arg == "parameters")
+            self.assertIs(ast.literal_eval(params)[0]["manage_leader_service"], False)
 
     def test_intervention_handoff_selects_and_closes_arbiter(self):
         source = (DOCKER / "bringup_control_ui" / "server.py").read_text(

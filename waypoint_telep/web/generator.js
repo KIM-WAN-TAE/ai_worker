@@ -228,7 +228,7 @@ function renderRobotPreview() {
       viewer.transformControls.enabled = false;
       viewer.transformControlsHelper.visible = false;
       viewer.setJointValues(jointValues);
-      byId('modelMeta').textContent = '오른팔 현재 joint state를 F2 전체 URDF·STL mesh에 표시하고 있습니다.';
+      byId('modelMeta').textContent = '오른팔 현재 joint state를 로봇 전체 URDF·STL mesh에 표시하고 있습니다.';
     }
     return;
   }
@@ -304,7 +304,7 @@ async function ensureRobotSimulator(arm) {
   const token = state.simulator.loadToken + 1;
   state.simulator.loadToken = token;
   state.simulator.loading = true;
-  byId('modelBadge').textContent = 'F2 mesh 로딩 중';
+  byId('modelBadge').textContent = '로봇 mesh 로딩 중';
   byId('modelBadge').className = 'badge waiting';
   byId('modelMeta').textContent = `${arm === 'right' ? '오른팔' : '왼팔'} URDF·STL mesh를 불러오는 중입니다.`;
   try {
@@ -335,14 +335,14 @@ async function ensureRobotSimulator(arm) {
     state.simulator.runtime = runtime;
     state.simulator.arm = arm;
     byId('simulationEmpty').style.display = 'none';
-    byId('modelBadge').textContent = 'F2 3D 준비됨';
+    byId('modelBadge').textContent = '로봇 3D 준비됨';
     byId('modelBadge').className = 'badge ready';
     renderRobotPreview();
   } catch (error) {
     if (token !== state.simulator.loadToken) return;
     byId('modelBadge').textContent = '3D 모델 오류';
     byId('modelBadge').className = 'badge error';
-    byId('modelMeta').textContent = `F2 3D 모델을 불러오지 못했습니다: ${error.message}`;
+    byId('modelMeta').textContent = `로봇 3D 모델을 불러오지 못했습니다: ${error.message}`;
     toast(error.message, true);
   } finally {
     if (token === state.simulator.loadToken) state.simulator.loading = false;

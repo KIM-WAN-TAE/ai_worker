@@ -27,6 +27,7 @@
 
 """Launch realsense2_camera node."""
 import copy
+import math
 import os
 import re
 import subprocess
@@ -34,9 +35,10 @@ import sys
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, OpaqueFunction
+from launch.actions import DeclareLaunchArgument, GroupAction, OpaqueFunction, TimerAction
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import Node, SetRemap
 import yaml
 
 # Add realsense2_camera/launch to sys.path using ROS package discovery
@@ -88,11 +90,14 @@ def devices_from_realsense_context():
 
     try:
         context = rs.context()
+        connected_devices = list(context.query_devices())
     except RuntimeError:
+        # A running camera can deny enumeration during a camera-only restart.
+        # Let discovery fall back to the saved serial mapping in that case.
         return []
 
     devices = []
-    for device in context.query_devices():
+    for device in connected_devices:
         serial = get_device_info(device, rs.camera_info.serial_number)
         if not serial:
             continue
@@ -389,9 +394,13 @@ local_parameters = [{'name': 'camera_name1', 'default': 'camera_left',
                     {'name': 'depth_module.depth_profile2', 'default': '640,480,15',
                      'description': 'depth stream profile for camera2'},
                     {'name': 'depth_module.color_profile1', 'default': '640,480,15',
-                     'description': 'Depth module color stream profile for d405 camera1'},
+                     'description': 'Left color capture profile; prioritize 15fps on the current USB2 link'},
                     {'name': 'depth_module.color_profile2', 'default': '640,480,15',
                      'description': 'Depth module color stream profile for d405 camera2'},
+                    {'name': 'enable_depth1', 'default': 'false',
+                     'description': 'Disable unused left depth stream to reduce USB traffic'},
+                    {'name': 'enable_depth2', 'default': 'false',
+                     'description': 'Disable unused right depth stream to reduce USB traffic'},
                      {'name': 'depth_module.depth_profile3', 'default': '640,480,15',
                     'description': 'Depth stream profile for D455 head camera'},
                     {'name': 'rgb_camera.color_profile3', 'default': '640,480,15',
@@ -416,12 +425,85 @@ def duplicate_params(general_params, posix):
     return local_params
 
 
+def launch_left_camera(context, params):
+    namespace = LaunchConfiguration('camera_namespace1').perform(context).strip('/')
+    name = LaunchConfiguration('camera_name1').perform(context).strip('/')
+    prefix = '/' + '/'.join(part for part in (namespace, name, 'color') if part)
+    image = prefix + '/image_rect_raw'
+    source_image = prefix + '/unzoomed/image_rect_raw'
+    info = prefix + '/camera_info'
+    source_info = prefix + '/unzoomed/camera_info'
+    remaps = [SetRemap(src=info, dst=source_info)]
+    for suffix in ('', '/compressed', '/compressedDepth', '/theora', '/ffmpeg', '/zstd'):
+        remaps.append(SetRemap(src=image + suffix, dst=source_image + suffix))
+    return [
+        GroupAction(actions=remaps + [OpaqueFunction(
+            function=rs_launch.launch_setup,
+            kwargs={'params': params, 'param_name_suffix': '1'},
+        )]),
+        Node(
+            package='ffw_bringup', executable='color_zoom',
+            namespace=namespace, name='color_zoom', output='screen',
+            respawn=True, respawn_delay=2.0,
+            parameters=[{
+                'input_image': source_image, 'input_info': source_info,
+                'output_image': image, 'output_info': info,
+                'zoom': float(LaunchConfiguration('left_color_zoom').perform(context)),
+                'display_rotation': 270,
+                'output_width': 640,
+                'output_height': 480,
+                # An optional calibrated crop can preserve the VGA field of view
+                # when a different sensor profile is selected.
+                'source_crop': [int(value) for value in
+                                LaunchConfiguration('left_color_crop').perform(context).split(',')],
+            }],
+        ),
+    ]
+
+
+def launch_cameras_staggered(context, camera_params):
+    interval = float(LaunchConfiguration('camera_startup_interval').perform(context))
+    if not math.isfinite(interval) or interval < 0:
+        raise ValueError('camera_startup_interval must be a finite, non-negative number')
+
+    # RSUSB discovery opens devices before filtering by serial. Concurrent nodes
+    # can therefore contend even when they request different cameras. Allow each
+    # node time to initialize before the next starts on the shared USB2 hub.
+    actions = []
+    for index, params in enumerate(camera_params, start=1):
+        role = CAMERA_ROLES[index]
+        if not IfCondition(LaunchConfiguration(f'enable_{role}_camera')).evaluate(context):
+            continue
+        action = OpaqueFunction(
+            function=launch_left_camera if index == 1 else rs_launch.launch_setup,
+            kwargs={'params': params} if index == 1 else {
+                'params': params, 'param_name_suffix': str(index)},
+        )
+        delay = len(actions) * interval
+        actions.append(TimerAction(period=delay, actions=[action]) if delay else action)
+    return actions
+
+
 def generate_launch_description():
     params1 = duplicate_params(rs_launch.configurable_parameters, '1')
     params2 = duplicate_params(rs_launch.configurable_parameters, '2')
     params3 = duplicate_params(rs_launch.configurable_parameters, '3')
     return LaunchDescription(
         [
+            DeclareLaunchArgument(
+                'camera_startup_interval', default_value='20.0',
+                description='Seconds between enabled RealSense camera starts to reduce '
+                            'USB initialization contention; 0 starts them together.'),
+            DeclareLaunchArgument('enable_left_camera', default_value='true',
+                                  choices=['true', 'false']),
+            DeclareLaunchArgument('enable_right_camera', default_value='true',
+                                  choices=['true', 'false']),
+            DeclareLaunchArgument('left_color_zoom', default_value='2.0',
+                                  description='Left color stream zoom, anchored at the '
+                                              'displayed bottom for 270-degree rotation.'),
+            DeclareLaunchArgument('left_color_crop', default_value='0,0,0,0',
+                                  description='Crop x,y,width,height; zeros use automatic zoom. '
+                                              'For matching VGA framing in 720p use 108,161,532,399.'),
             DeclareLaunchArgument(
                 'enable_head_camera',
                 default_value='false',
@@ -437,26 +519,11 @@ def generate_launch_description():
         rs_launch.declare_configurable_parameters(params3) +
         [
             OpaqueFunction(
-                function=rs_launch.launch_setup,
+                function=launch_cameras_staggered,
                 kwargs={
-                    'params': set_configurable_parameters(params1),
-                    'param_name_suffix': '1'
-                }
-            ),
-            OpaqueFunction(
-                function=rs_launch.launch_setup,
-                kwargs={
-                    'params': set_configurable_parameters(params2),
-                    'param_name_suffix': '2'
-                }
-            ),
-            OpaqueFunction(
-                function=rs_launch.launch_setup,
-                kwargs={
-                    'params': set_configurable_parameters(params3),
-                    'param_name_suffix': '3'
+                    'camera_params': [set_configurable_parameters(params)
+                                      for params in (params1, params2, params3)],
                 },
-                condition=IfCondition(LaunchConfiguration('enable_head_camera'))
             ),
         ]
     )

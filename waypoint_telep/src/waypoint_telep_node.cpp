@@ -109,7 +109,7 @@ public:
     angular_speed_radps_ = declare_parameter<double>("angular_speed_radps", 0.20);
     joint_speed_radps_ = declare_parameter<double>("joint_speed_radps", 0.20);
     gripper_speed_radps_ = declare_parameter<double>("gripper_speed_radps", 0.20);
-    slow_start_speed_scale_ = declare_parameter<double>("slow_start_speed_scale", 1.0);
+    slow_start_speed_scale_ = declare_parameter<double>("slow_start_speed_scale", 0.2);
     minimum_segment_duration_s_ = declare_parameter<double>(
       "minimum_segment_duration_s", 0.50);
     max_waypoint_dwell_s_ = declare_parameter<double>("max_waypoint_dwell_s", 30.0);
@@ -199,6 +199,11 @@ public:
       "~/equal_total_time", 10,
       [this](const std_msgs::msg::Float64MultiArray::SharedPtr message) {
         assign_segment_times(message, true);
+      });
+    scheduled_total_time_subscription_ = create_subscription<std_msgs::msg::Float64MultiArray>(
+      "~/scheduled_total_time", 10,
+      [this](const std_msgs::msg::Float64MultiArray::SharedPtr message) {
+        assign_segment_times(message, true, true);
       });
     uniform_total_time_subscription_ = create_subscription<std_msgs::msg::Float64MultiArray>(
       "~/uniform_total_time", 10,
@@ -1923,7 +1928,8 @@ private:
   }
 
   void assign_segment_times(
-    const std_msgs::msg::Float64MultiArray::SharedPtr message, bool total_time)
+    const std_msgs::msg::Float64MultiArray::SharedPtr message, bool total_time,
+    bool scheduled = false)
   {
     if (executing_) {publish_error("cannot assign segment times while executing"); return;}
     if (!chain_ready_ || waypoints_.size() < 2) {
@@ -1976,6 +1982,11 @@ private:
         excluded[static_cast<std::size_t>(index) - 1] = true;
       }
       std::vector<double> base(waypoints_.size(), 0.0), scales, dwells;
+      const bool continuous = refinement_.enabled || (joint_smoothing_enabled_ &&
+        std::all_of(waypoints_.begin(), waypoints_.end(),
+          [](const Waypoint & w) {return w.interpolation_mode == PathMode::JOINT;}));
+      std::vector<double> motion_minimum(waypoints_.size(), (continuous ? 1.0 : 2.0) / control_rate_hz_);
+      std::vector<double> travel(waypoints_.size(), 0.0);
       KDL::JntArray seed = current_positions_;
       std::vector<double> previous;
       std::string error;
@@ -1993,11 +2004,43 @@ private:
                 linear_speed_mps_, angular_speed_radps_, minimum_segment_duration_s_),
               std::abs(target.back() - previous.back()) / gripper_speed_radps_);
         }
+        if (i > 0) {
+          // Estimate the TCP arc of each resolved joint segment, including
+          // turns whose endpoint chord can be misleadingly short.
+          KDL::Vector last;
+          for (unsigned int sample = 0; sample <= 16; ++sample) {
+            KDL::JntArray joints(joint_names_.size());
+            for (unsigned int j = 0; j < joints.rows(); ++j) {
+              joints(j) = previous[j] + (target[j] - previous[j]) * sample / 16.0;
+            }
+            KDL::Frame frame;
+            if (fk_solver_->JntToCart(joints, frame) < 0) {
+              throw std::runtime_error("timing distance FK failed");
+            }
+            if (sample > 0) {
+              const auto delta = frame.p - last;
+              travel[i] += std::hypot(delta.x(), delta.y(), delta.z());
+            }
+            last = frame.p;
+          }
+          // Keep enough control periods for large arm/gripper transitions.
+          // A two-times secant envelope leaves room for the cubic slope;
+          // the actual generated samples are still checked before commit.
+          for (std::size_t j = 0; j < target.size(); ++j) {
+            const double speed = std::min(velocity_limits_[j], max_joint_step_rad_ * control_rate_hz_);
+            motion_minimum[i] = std::max(motion_minimum[i],
+              2.0 * std::abs(target[j] - previous[j]) / speed);
+          }
+        }
         for (unsigned int j = 0; j < seed.rows(); ++j) {seed(j) = target[j];}
         previous = target;
         scales.push_back(waypoint.speed_scale);
         dwells.push_back(waypoint.dwell_s);
       }
+      // The baseline is a unit-scale geometric plan, never the old TCP clock.
+      // Otherwise measured base durations include the previous retiming and
+      // produce invalid scales when that clock is cleared below.
+      joint_timing_ = {0.0, 0.0, 0.0};
       if (refinement_.enabled) {
         // Measure the same refined planner used for preview/execution. IK
         // detours may need longer than an endpoint-only duration estimate.
@@ -2016,7 +2059,10 @@ private:
         }
         for (std::size_t i = 0; i < waypoints_.size(); ++i) {waypoints_[i].speed_scale = scales[i];}
       }
-      auto result = total_time ? equal_segment_scales_for_total(
+      auto result = scheduled ? scheduled_segment_scales_for_total(
+        base, scales, excluded, dwells, message->data[0], max_waypoint_speed_scale_, control_rate_hz_,
+        motion_minimum, travel) :
+        total_time ? equal_segment_scales_for_total(
         base, scales, excluded, dwells, message->data[0], max_waypoint_speed_scale_) :
         equal_segment_scales(base, scales, excluded, message->data[0], max_waypoint_speed_scale_);
       joint_timing_ = {0.0, 0.0, 0.0};
@@ -2052,7 +2098,8 @@ private:
       for (std::size_t i = 1; i < waypoints_.size(); ++i) {
         const double actual = arrivals[i * stride] - arrivals[(i - 1) * stride] -
           waypoints_[i - 1].dwell_s;
-        const double expected = excluded[i] ? base[i] / scales[i] : result.duration_s;
+        const double expected = excluded[i] ? base[i] / scales[i] :
+          scheduled ? base[i] / result.scales[i] : result.duration_s;
         const double deviation = std::abs(actual - expected);
         if (!std::isfinite(actual) || deviation > 1.e-6) {
           throw std::runtime_error("planned segment time does not match the assignment");
@@ -2063,8 +2110,31 @@ private:
         }
       }
       const auto & finish = verification.trajectory.points.back().time_from_start;
-      const double execution_total = static_cast<double>(finish.sec) + 1.e-9 * finish.nanosec;
-      const double alignment = arrivals[0];
+      double execution_total = static_cast<double>(finish.sec) + 1.e-9 * finish.nanosec;
+      double alignment = arrivals[0];
+      if (scheduled) {
+        double stream = 0, alignment_stream = 0, previous_t = 0;
+        const trajectory_msgs::msg::JointTrajectoryPoint * previous = nullptr;
+        for (const auto & point : verification.trajectory.points) {
+          const double t = point.time_from_start.sec + 1.e-9 * point.time_from_start.nanosec;
+          const double dt = t - previous_t;
+          if (dt <= 0) {throw std::runtime_error("non-increasing trajectory timestamps");}
+          stream += std::max(1.0 / control_rate_hz_, dt);
+          if (t <= alignment + 1.e-8) {alignment_stream = stream;}
+          if (previous) {
+            for (std::size_t j = 0; j < point.positions.size(); ++j) {
+              if (std::abs(point.positions[j] - previous->positions[j]) / dt >
+                velocity_limits_[j] + 1.e-6)
+              {throw std::runtime_error("scheduled trajectory exceeds joint velocity limit at joint " +
+                  std::to_string(j + 1));}
+            }
+          }
+          previous = &point;
+          previous_t = t;
+        }
+        execution_total = stream;
+        alignment = alignment_stream;
+      }
       const double actual_total = execution_total - alignment;
       const double total_error = total_time ? std::abs(actual_total - message->data[0]) : 0.0;
       if (!std::isfinite(actual_total) || (total_time && total_error > 1.e-6)) {
@@ -2090,7 +2160,7 @@ private:
         ", target_total_s=" << (total_time ? message->data[0] : 0.0) <<
         ", total_error_s=" << total_error << ", alignment_s=" << alignment <<
         ", execution_total_s=" << execution_total << ", fixed_s=" << result.fixed_s <<
-        ", mode=" << (total_time ? "total" : "segment") << ", reference=" <<
+        ", mode=" << (scheduled ? "scheduled" : total_time ? "total" : "segment") << ", reference=" <<
         (offline ? "first_waypoint" : "live_joint_state");
       publish_status(status.str());
     } catch (const std::exception & exception) {
@@ -2704,8 +2774,7 @@ private:
     if (dwell_s <= 0.0) {
       return true;
     }
-    const std::size_t sample_count = std::max<std::size_t>(
-      1, static_cast<std::size_t>(std::ceil(dwell_s * control_rate_hz_)));
+    const std::size_t sample_count = control_sample_count(dwell_s, control_rate_hz_, 1);
     const double sample_period_s = dwell_s / static_cast<double>(sample_count);
     for (std::size_t sample = 0; sample < sample_count; ++sample) {
       if (!append_joint_sample(
@@ -2929,8 +2998,10 @@ private:
       {
         return false;
       }
-      const double speed_scale = slow_start && sequence_index == 0 ?
-        std::min(waypoints_[waypoint_index].speed_scale, slow_start_speed_scale_) :
+      // A stored segment scale describes travel from the preceding waypoint,
+      // not travel from an arbitrary measured pose to a selected start point.
+      const double speed_scale = sequence_index == 0 ?
+        std::min(waypoints_[waypoint_index].speed_scale, slow_start ? slow_start_speed_scale_ : 1.0) :
         waypoints_[waypoint_index].speed_scale;
       const double duration = joint_segment_duration_s(
         previous_target, target, speed_scale);
@@ -2944,8 +3015,7 @@ private:
     double elapsed_s = 0.0;
     std::vector<double> previous_sample = live_positions;
     const JointSplineKnot & first = knots.front();
-    const std::size_t alignment_samples = std::max<std::size_t>(
-      2, static_cast<std::size_t>(std::ceil(first.incoming_duration_s * control_rate_hz_)));
+    const std::size_t alignment_samples = control_sample_count(first.incoming_duration_s, control_rate_hz_);
     const double alignment_period =
       first.incoming_duration_s / static_cast<double>(alignment_samples);
     // Start from fresh measured positions and settle at the first stored waypoint
@@ -3006,8 +3076,7 @@ private:
       const JointSplineKnot & start = knots[segment];
       const JointSplineKnot & goal = knots[segment + 1];
       const double duration = goal.incoming_duration_s;
-      const std::size_t sample_count = std::max<std::size_t>(
-        2, static_cast<std::size_t>(std::ceil(duration * control_rate_hz_)));
+      const std::size_t sample_count = control_sample_count(duration, control_rate_hz_, 1);
       const double sample_period = duration / static_cast<double>(sample_count);
       for (std::size_t sample = 1; sample <= sample_count; ++sample) {
         const double progress = static_cast<double>(sample) /
@@ -3230,11 +3299,10 @@ private:
         previous.back() = anchors[0].back();
         const auto live = previous;
         failing_segment = indices.front() + 1;
-        const double alignment = joint_segment_duration_s(live, anchors[0], slow_start ?
-          std::min(waypoints_[indices[0]].speed_scale, slow_start_speed_scale_) :
-          waypoints_[indices[0]].speed_scale);
+        const double alignment = joint_segment_duration_s(live, anchors[0],
+          std::min(waypoints_[indices[0]].speed_scale, slow_start ? slow_start_speed_scale_ : 1.0));
         double elapsed = 0;
-        const std::size_t alignment_count = std::max<std::size_t>(2, std::ceil(alignment * control_rate_hz_));
+        const std::size_t alignment_count = control_sample_count(alignment, control_rate_hz_);
         if (alignment_count > 250000) {throw std::runtime_error("alignment sample limit exceeded");}
         for (std::size_t s = 1; s <= alignment_count; ++s) {
           auto q = live;
@@ -3264,7 +3332,7 @@ private:
           const auto & b = knots[k];
           const std::size_t source = b.source;
           const double start_t = a.source == source ? a.progress : 0.0;
-          const std::size_t count = std::max<std::size_t>(2, std::ceil(b.duration * control_rate_hz_));
+          const std::size_t count = control_sample_count(b.duration, control_rate_hz_);
           if (candidate.trajectory.points.size() + count > 250000) {
             throw std::runtime_error("trajectory sample limit exceeded (250000)");
           }
@@ -3452,8 +3520,8 @@ private:
       const CartesianPose & segment_goal = waypoint.pose;
       const KDL::JntArray segment_seed = seed;
       const double gripper_segment_seed = gripper_seed;
-      const double speed_scale = slow_start && sequence_index == 0 ?
-        std::min(waypoint.speed_scale, slow_start_speed_scale_) :
+      const double speed_scale = sequence_index == 0 ?
+        std::min(waypoint.speed_scale, slow_start ? slow_start_speed_scale_ : 1.0) :
         waypoint.speed_scale;
       double duration_s = minimum_segment_duration_s_;
       KDL::JntArray joint_goal(chain_.getNrOfJoints());
@@ -3701,7 +3769,7 @@ private:
   double angular_speed_radps_{0.20};
   double joint_speed_radps_{0.20};
   double gripper_speed_radps_{0.20};
-  double slow_start_speed_scale_{1.0};
+  double slow_start_speed_scale_{0.2};
   double minimum_segment_duration_s_{0.50};
   double max_waypoint_dwell_s_{30.0};
   double max_waypoint_speed_scale_{3.0};
@@ -3775,6 +3843,8 @@ private:
     equal_total_time_subscription_;
   rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr
     uniform_total_time_subscription_;
+  rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr
+    scheduled_total_time_subscription_;
   rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr
     waypoint_gripper_subscription_;
   rclcpp::Subscription<std_msgs::msg::Int32MultiArray>::SharedPtr

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from functools import lru_cache
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler
 from http.server import ThreadingHTTPServer
@@ -50,6 +51,8 @@ from trajectory_msgs.msg import JointTrajectory
 from trajectory_msgs.msg import JointTrajectoryPoint
 
 
+STREAM_PROTOCOL_VERSION = 2
+
 ACTION_NAMES = {
     'capture_current',
     'remove_last',
@@ -75,20 +78,7 @@ CARTESIAN_JOG_DIRECTIONS = {
     'up': (0.0, 0.0, 1.0),
     'down': (0.0, 0.0, -1.0),
 }
-F2_POSITION_LIMITS = {
-    'left': [
-        (-3.14, 3.14), (0.0, 3.14), (-3.14, 3.14),
-        (-2.9361, 1.0785802414820915),
-        (-3.14, 3.14), (-1.57, 1.57),
-        (-1.8201, 1.5804), (0.0, 1.1),
-    ],
-    'right': [
-        (-3.14, 3.14), (-3.14, 0.0), (-3.14, 3.14),
-        (-2.9361, 1.0785802414820915),
-        (-3.14, 3.14), (-1.57, 1.57),
-        (-1.5804, 1.8201), (0.0, 1.1),
-    ],
-}
+
 
 
 def arm_joint_names(arm: str) -> list[str]:
@@ -290,20 +280,28 @@ def parse_speed_scale(
 
 
 def smooth_joint_transition(
-    start: list[float], target: list[float], maximum_step: float
+    start: list[float], target: list[float], maximum_step: float,
+    *, velocity_limits: list[float], rate_hz: float,
 ) -> list[list[float]]:
-    """Create a quintic transition whose adjacent joint steps stay bounded."""
+    """Bound both quintic peak velocity and the distance between commands."""
     if len(start) != len(target) or not start:
         raise ValueError('관절 전환 시작값과 목표값의 크기가 올바르지 않습니다.')
     if not math.isfinite(maximum_step) or maximum_step <= 0.0:
         raise ValueError('관절 전환 간격 제한이 올바르지 않습니다.')
     if any(not math.isfinite(value) for value in [*start, *target]):
         raise ValueError('관절 전환값은 유한한 숫자여야 합니다.')
+    if (not math.isfinite(rate_hz) or rate_hz <= 0.0
+            or len(velocity_limits) != len(start)
+            or any(not math.isfinite(v) or v <= 0.0 for v in velocity_limits)):
+        raise ValueError('관절 전환 속도 및 주기 제한이 올바르지 않습니다.')
     maximum_delta = max(abs(goal - current) for current, goal in zip(start, target))
-    if maximum_delta <= maximum_step:
+    if maximum_delta == 0.0:
         return []
 
-    step_count = max(2, math.ceil(maximum_delta / maximum_step))
+    # The maximum derivative of 10*t^3 - 15*t^4 + 6*t^5 is 1.875.
+    step_count = max(2, math.ceil(max(
+        1.875 * abs(goal - current) / min(maximum_step, velocity / rate_hz)
+        for current, goal, velocity in zip(start, target, velocity_limits))))
     while True:
         points = []
         for step in range(1, step_count + 1):
@@ -480,6 +478,40 @@ def _parse_vector(text: str | None, default: tuple[float, float, float]) -> list
     if len(values) != 3 or not all(math.isfinite(value) for value in values):
         raise ValueError(f'URDF vector must contain three finite values: {text}')
     return values
+
+
+@lru_cache(maxsize=8)
+def urdf_position_limits(robot_description: str, arm: str) -> tuple[tuple[float, float], ...]:
+    """Read the active robot's complete arm/gripper command limits."""
+    if not robot_description:
+        raise ValueError('로봇 URDF를 기다리고 있습니다. 연결 후 다시 시도해 주세요.')
+    try:
+        root = ElementTree.fromstring(robot_description)
+        joints = {joint.get('name'): joint for joint in root.findall('joint')}
+        result = []
+        for name in command_joint_names(arm):
+            limit = joints[name].find('limit')
+            lower, upper = float(limit.get('lower')), float(limit.get('upper'))
+            if not all(math.isfinite(v) for v in (lower, upper)) or lower > upper:
+                raise ValueError(f'invalid joint limits: {name}')
+            result.append((lower, upper))
+        return tuple(result)
+    except (ElementTree.ParseError, KeyError, AttributeError, TypeError) as exc:
+        raise ValueError('URDF arm/gripper limits are missing or invalid') from exc
+
+
+@lru_cache(maxsize=8)
+def urdf_velocity_limits(robot_description: str, arm: str) -> tuple[float, ...]:
+    try:
+        joints = {joint.get('name'): joint
+                  for joint in ElementTree.fromstring(robot_description).findall('joint')}
+        limits = tuple(float(joints[name].find('limit').get('velocity'))
+                       for name in command_joint_names(arm))
+        if any(not math.isfinite(v) or v <= 0.0 for v in limits):
+            raise ValueError('URDF velocity limits must be finite and positive')
+        return limits
+    except (ElementTree.ParseError, KeyError, AttributeError, TypeError) as exc:
+        raise ValueError('URDF arm/gripper velocity limits are missing or invalid') from exc
 
 
 def parse_urdf_chain(
@@ -700,6 +732,12 @@ class WaypointUiBridge(Node):
             'max_joint_step_rad', 0.05).value)
         self.control_rate_hz = float(self.declare_parameter(
             'control_rate_hz', 100.0).value)
+        self.joint_speed_radps = float(self.declare_parameter(
+            'joint_speed_radps', 0.20).value)
+        self.gripper_speed_radps = float(self.declare_parameter(
+            'gripper_speed_radps', 0.20).value)
+        self.slow_start_speed_scale = float(self.declare_parameter(
+            'slow_start_speed_scale', 0.2).value)
         self.handoff_stop_timeout_s = float(self.declare_parameter(
             'handoff_stop_timeout_s', 2.0).value)
         self.completion_timeout_s = float(self.declare_parameter(
@@ -735,12 +773,21 @@ class WaypointUiBridge(Node):
             raise ValueError("path_mode must be 'linear' or 'joint'")
         if (
             self.max_start_velocity_radps < 0.0
+            or not math.isfinite(self.max_joint_step_rad)
             or self.max_joint_step_rad <= 0.0
             or not math.isfinite(self.control_rate_hz)
             or self.control_rate_hz <= 0.0
+            or self.control_rate_hz > 100.0
+            or not math.isfinite(self.joint_speed_radps)
+            or self.joint_speed_radps <= 0.0
+            or not math.isfinite(self.gripper_speed_radps)
+            or self.gripper_speed_radps <= 0.0
+            or not math.isfinite(self.slow_start_speed_scale)
+            or not 0.0 < self.slow_start_speed_scale <= 1.0
             or self.handoff_stop_timeout_s <= 0.0
             or self.completion_timeout_s <= 0.0
             or self.completion_tolerance_rad <= 0.0
+            or not math.isfinite(self.max_schedule_lag_s)
             or self.max_schedule_lag_s <= 0.0
             or self.max_waypoint_dwell_s <= 0.0
             or not math.isfinite(self.max_waypoint_speed_scale)
@@ -849,6 +896,7 @@ class WaypointUiBridge(Node):
         self.equal_segment_time_publishers: dict[str, Any] = {}
         self.equal_total_time_publishers: dict[str, Any] = {}
         self.uniform_total_time_publishers: dict[str, Any] = {}
+        self.scheduled_total_time_publishers: dict[str, Any] = {}
         self.waypoint_gripper_publishers: dict[str, Any] = {}
         self.waypoint_mode_publishers: dict[str, Any] = {}
         self.joint_smoothing_publishers: dict[str, Any] = {}
@@ -1059,6 +1107,8 @@ class WaypointUiBridge(Node):
                 Float64MultiArray, f'{namespace}/equal_segment_time', 10)
             self.equal_total_time_publishers[selected_arm] = self.create_publisher(
                 Float64MultiArray, f'{namespace}/equal_total_time', 10)
+            self.scheduled_total_time_publishers[selected_arm] = self.create_publisher(
+                Float64MultiArray, f'{namespace}/scheduled_total_time', 10)
             self.uniform_total_time_publishers[selected_arm] = self.create_publisher(
                 Float64MultiArray, f'{namespace}/uniform_total_time', 10)
             self.waypoint_gripper_publishers[selected_arm] = self.create_publisher(
@@ -1478,6 +1528,43 @@ class WaypointUiBridge(Node):
             if any(model['status'] == 'ready' for model in models.values()):
                 self.robot_description_xml = message.data
 
+    def _position_limits(self, arm: str) -> tuple[tuple[float, float], ...]:
+        try:
+            return urdf_position_limits(self.robot_description_xml, arm)
+        except ValueError as exc:
+            raise RuntimeError(str(exc)) from exc
+
+    def _velocity_limits(self, arm: str) -> tuple[float, ...]:
+        try:
+            return urdf_velocity_limits(self.robot_description_xml, arm)
+        except ValueError as exc:
+            raise RuntimeError(str(exc)) from exc
+
+    def _start_transition(
+        self, arm: str, start: list[float], target: list[float], start_speed_scale=1.0,
+    ):
+        if not math.isfinite(start_speed_scale) or not 0.0 < start_speed_scale <= 1.0:
+            raise ValueError('시작 연결 속도 배율은 0보다 크고 1 이하여야 합니다.')
+        configured = [self.joint_speed_radps * start_speed_scale] * 7 + [
+            self.gripper_speed_radps * start_speed_scale]
+        return smooth_joint_transition(
+            start, target, self.max_joint_step_rad,
+            velocity_limits=[min(limit, speed) for limit, speed in
+                             zip(self._velocity_limits(arm), configured)],
+            rate_hz=self.control_rate_hz)
+
+    def _stream_duration_s(
+        self, arm: str, trajectory: JointTrajectory, start: list[float], start_speed_scale=1.0,
+    ):
+        duration = len(self._start_transition(
+            arm, start, list(trajectory.points[0].positions), start_speed_scale)) / self.control_rate_hz
+        previous = 0.0
+        for point in trajectory.points:
+            stamp = self._trajectory_time(point)
+            duration += max(1.0 / self.control_rate_hz, stamp - previous)
+            previous = stamp
+        return duration
+
     def _select_arm(self, arm: Any = None) -> str:
         selected = self.default_arm if arm in (None, '') else str(arm)
         if selected not in self.available_arms:
@@ -1617,6 +1704,7 @@ class WaypointUiBridge(Node):
             'max_uniform_tcp_speed_mps': self.max_uniform_tcp_speed_mps,
             'equal_segment_time_supported': True,
             'equal_total_time_supported': True,
+            'scheduled_total_time_supported': self.scheduled_total_time_publishers[selected_arm].get_subscription_count() > 0,
             'uniform_total_time_supported': True,
             'uniform_refinement_supported': True,
             'publish_enabled': self.publish_enabled,
@@ -1883,6 +1971,18 @@ class WaypointUiBridge(Node):
             raise RuntimeError('world 기준 절대 waypoint의 IK 계산 응답이 없습니다.')
         return self._apply_added_options(arm, status, dwell_s, speed_scale)
 
+    def _wait_for_waypoint_count(self, arm: str, count: int) -> None:
+        # Status and PoseArray travel on different topics. Wait for both before
+        # using an index; a delayed pre-clear array must not select an old row.
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            with self.lock:
+                state = self.arm_states[arm]
+                if state['waypoint_count'] == count and len(state['waypoints']) == count:
+                    return
+            time.sleep(0.01)
+        raise RuntimeError('waypoint 목록 갱신 응답 시간이 초과되었습니다.')
+
     def _apply_added_options(
         self, arm: str, added_status: str, dwell_s: float, speed_scale: float
     ) -> dict[str, Any]:
@@ -1890,6 +1990,7 @@ class WaypointUiBridge(Node):
             index = int(added_status.rsplit('count=', 1)[1])
         except (IndexError, ValueError) as exception:
             raise RuntimeError('추가된 waypoint 번호를 확인할 수 없습니다.') from exception
+        self._wait_for_waypoint_count(arm, index)
         result: dict[str, Any] = {'success': True, 'message': added_status}
         details = []
         if dwell_s > 0.0:
@@ -1942,9 +2043,12 @@ class WaypointUiBridge(Node):
             trajectory_sequence = state['trajectory_sequence']
         total_mode = 'total_duration_s' in payload
         distribution = payload.get('distribution', 'equal')
-        if distribution not in ('equal', 'uniform'):
-            raise ValueError('시간 배정 방식은 equal 또는 uniform이어야 합니다.')
+        if distribution not in ('equal', 'uniform', 'scheduled'):
+            raise ValueError('시간 배정 방식은 equal, uniform 또는 scheduled이어야 합니다.')
         uniform_mode = total_mode and distribution == 'uniform'
+        scheduled_mode = total_mode and distribution == 'scheduled'
+        if distribution == 'scheduled' and not total_mode:
+            raise ValueError('실행 시간 배정에는 전체 목표시간이 필요합니다.')
         if distribution == 'uniform' and not total_mode:
             raise ValueError('끝단 등속 배정에는 전체 목표시간이 필요합니다.')
         if uniform_mode:
@@ -1957,7 +2061,8 @@ class WaypointUiBridge(Node):
                                      'JOINT 연속 통과를 켜거나, 부드럽게 연결을 적용한 상태에서 사용해 주세요.')
             if excluded and excluded != list(range(excluded[0], excluded[-1] + 1)):
                 raise ValueError('끝단 등속 배정의 제외 구간은 연속 번호로 지정해 주세요.')
-        publisher = (self.uniform_total_time_publishers if uniform_mode else
+        publisher = (self.scheduled_total_time_publishers if scheduled_mode else
+                     self.uniform_total_time_publishers if uniform_mode else
                      self.equal_total_time_publishers if total_mode else
                      self.equal_segment_time_publishers)[arm]
         if publisher.get_subscription_count() == 0:
@@ -2010,6 +2115,11 @@ class WaypointUiBridge(Node):
                     'execution_total_s', 'fixed_s'):
             result[key] = float(fields[key])
         result['mode'] = fields['mode']
+        if scheduled_mode:
+            return {'success': True, **result, 'message': (
+                f"전체 전송시간 검증 완료 · 첫 지점부터 마지막 지점까지 {result['total_s']:.3f}초"
+                f" / 목표 {result['target_total_s']:.3f}초 · {result['updated']}개 구간 배정 · "
+                f"{result['excluded']}개 구간 보존 · 첫 지점 정렬 {result['alignment_s']:.3f}초 별도")}
         if uniform_mode:
             result['speed_mps'] = float(fields['speed_mps'])
             return {'success': True, **result, 'message': (
@@ -2401,7 +2511,7 @@ class WaypointUiBridge(Node):
             if not worker.is_file():
                 worker = Path(__file__).with_name('waypoint_curve_generator.py')
             config = dict(payload=payload, arm=arm, model=model,
-                limits=F2_POSITION_LIMITS[arm], max_speed_scale=self.max_waypoint_speed_scale,
+                limits=self._position_limits(arm), max_speed_scale=self.max_waypoint_speed_scale,
                 robot_description=self.robot_description_snapshot())
             input_data = json.dumps(config, allow_nan=False)
             try:
@@ -2637,7 +2747,7 @@ class WaypointUiBridge(Node):
             except ValueError as exception:
                 raise ValueError(f'Waypoint {number}: {exception}') from exception
             for joint_name, value, (lower, upper) in zip(
-                command_joint_names(arm), positions, F2_POSITION_LIMITS[arm]
+                command_joint_names(arm), positions, self._position_limits(arm)
             ):
                 if value < lower or value > upper:
                     raise ValueError(
@@ -2720,15 +2830,14 @@ class WaypointUiBridge(Node):
             self.arm_states[arm]['waypoint_interpolated'] = []
             self.arm_states[arm]['plan_revision'] += 1
             self._clear_sequence_for_arm(arm)
-        for waypoint in parsed:
+        self._wait_for_waypoint_count(arm, 0)
+        for index, waypoint in enumerate(parsed, 1):
             self.add_joint_waypoint({
                 'arm': arm,
                 'positions_rad': waypoint['positions_rad'],
                 'dwell_s': waypoint['dwell_s'],
                 'speed_scale': waypoint['speed_scale'],
             })
-            with self.lock:
-                index = self.arm_states[arm]['waypoint_count']
             self.rename_waypoint({'arm': arm, 'index': index, 'name': waypoint['name']})
             self.update_waypoint_mode({
                 'arm': arm, 'index': index, 'mode': waypoint['mode']})
@@ -3265,7 +3374,7 @@ class WaypointUiBridge(Node):
 
     @staticmethod
     def _call_trigger(client, unavailable: str, timeout: str, timeout_s: float = 5.0):
-        if not client.wait_for_service(timeout_sec=1.0):
+        if not client.wait_for_service(timeout_sec=timeout_s):
             raise RuntimeError(unavailable)
         future = client.call_async(Trigger.Request())
         deadline = time.monotonic() + timeout_s
@@ -3375,7 +3484,7 @@ class WaypointUiBridge(Node):
                         raise RuntimeError(
                             f'{arm} 팔의 시작 waypoint 그리퍼 값이 없습니다.')
                     value = float(grippers[start_waypoint - 1])
-                    lower, upper = F2_POSITION_LIMITS[arm][-1]
+                    lower, upper = self._position_limits(arm)[-1]
                     if not math.isfinite(value) or value < lower or value > upper:
                         raise RuntimeError(
                             f'{arm} 팔의 시작 waypoint 그리퍼 값 '
@@ -3433,7 +3542,7 @@ class WaypointUiBridge(Node):
         if len(values) != len(names):
             raise RuntimeError(f'{arm} waypoint command 크기가 올바르지 않습니다.')
         for name, value, (lower, upper) in zip(
-            names, values, F2_POSITION_LIMITS[arm]
+            names, values, self._position_limits(arm)
         ):
             if not math.isfinite(value) or value < lower or value > upper:
                 raise RuntimeError(
@@ -3503,6 +3612,14 @@ class WaypointUiBridge(Node):
     def _validate_plan(
         self, arm: str, trajectory: JointTrajectory, start: list[float]
     ) -> None:
+        # Planning must still finish with fresh feedback on the UI side.
+        # The isolated worker separately validates the immutable plan contents.
+        self._validate_command_pair(self._current_command_positions())
+        self._validate_trajectory(arm, trajectory, start)
+
+    def _validate_trajectory(
+        self, arm: str, trajectory: JointTrajectory, start: list[float]
+    ) -> None:
         expected = command_joint_names(arm)
         if list(trajectory.joint_names) != expected or not trajectory.points:
             raise RuntimeError('실행 trajectory의 관절 순서 또는 point가 올바르지 않습니다.')
@@ -3511,15 +3628,14 @@ class WaypointUiBridge(Node):
         # with bounded intermediate commands before publishing the plan.
         previous: list[float] | None = None
         previous_time = 0.0
-        reference_pair = self._current_command_positions()
+        velocity_limits = self._velocity_limits(arm)
+        self._validate_arm_command(arm, start)
         for point in trajectory.points:
             values = list(point.positions)
             point_time = self._trajectory_time(point)
-            if len(values) != 8 or point_time <= previous_time:
+            if len(values) != 8 or not math.isfinite(point_time) or point_time <= previous_time:
                 raise RuntimeError('실행 trajectory의 크기 또는 시간이 올바르지 않습니다.')
-            pair = {side: list(values) for side, values in reference_pair.items()}
-            pair[arm] = values
-            self._validate_command_pair(pair)
+            self._validate_arm_command(arm, values)
             if previous is not None:
                 maximum_step = max(
                     abs(value - old) for value, old in zip(values, previous))
@@ -3527,12 +3643,20 @@ class WaypointUiBridge(Node):
                     raise RuntimeError(
                         f'trajectory 내부 관절 간격 {maximum_step:.6f} rad가 '
                         '제한을 넘었습니다.')
+                interval = point_time - previous_time
+                for name, value, old, limit in zip(expected, values, previous, velocity_limits):
+                    speed = abs(value - old) / interval
+                    if speed > limit + 1.0e-9:
+                        raise RuntimeError(
+                            f'{name} trajectory 속도 {speed:.6f} rad/s가 '
+                            f'URDF 제한 {limit:.6f} rad/s를 넘었습니다.')
             previous = values
             previous_time = point_time
 
     def _start_waypoint_execution(
         self, arm: str, slow_start: bool = False
     ) -> dict[str, Any]:
+        start_speed_scale = self.slow_start_speed_scale if slow_start else 1.0
         if not self.publish_enabled:
             raise RuntimeError('publish_enabled=false이므로 Preview만 가능합니다.')
         if self._keyboard_is_active():
@@ -3584,12 +3708,12 @@ class WaypointUiBridge(Node):
             self.execution_arm = arm
             self.execution_thread = threading.Thread(
                 target=self._run_waypoint_trajectory,
-                args=(arm, trajectory, hold, return_mode),
+                args=(arm, trajectory, hold, return_mode, start_speed_scale),
                 name=f'waypoint-{arm}-trajectory',
                 daemon=True,
             )
             self.execution_thread.start()
-        duration = self._trajectory_time(trajectory.points[-1])
+        duration = self._stream_duration_s(arm, trajectory, hold[arm], start_speed_scale)
         execution_name = 'SLOW START WAYPOINT' if slow_start else 'WAYPOINT'
         self._set_status(arm, f'EXECUTING: {execution_name} {duration:.3f} s')
         return {
@@ -3633,8 +3757,12 @@ class WaypointUiBridge(Node):
         reader.start()
         self._send_stream_message({
             'type': 'init', 'initial_pair': initial_pair,
+            'stream_protocol_version': STREAM_PROTOCOL_VERSION,
+            'robot_description': self.robot_description_snapshot(),
             'arbiter_namespace': self.command_arbiter_namespace,
             'control_rate_hz': self.control_rate_hz,
+            'joint_speed_radps': self.joint_speed_radps,
+            'gripper_speed_radps': self.gripper_speed_radps,
             'max_joint_step_rad': self.max_joint_step_rad,
             'max_schedule_lag_s': self.max_schedule_lag_s,
         })
@@ -3683,14 +3811,17 @@ class WaypointUiBridge(Node):
         arm: str,
         trajectory: JointTrajectory,
         initial_pair: dict[str, list[float]],
+        start_speed_scale=1.0,
     ) -> dict[str, list[float]]:
         if not getattr(self, 'isolated_streaming_enabled', False):
-            return self._stream_trajectory_local(arm, trajectory, initial_pair)
+            return self._stream_trajectory_local(
+                arm, trajectory, initial_pair, start_speed_scale=start_speed_scale)
         if getattr(self, '_stream_session', None) is None:
             raise RuntimeError('독립 trajectory 전송 세션이 없습니다.')
         _process, messages, _reader = self._stream_session
         self._send_stream_message({
             'type': 'plan', 'arm': arm, 'initial_pair': initial_pair,
+            'start_speed_scale': start_speed_scale,
             'points': [[self._trajectory_time(point), list(point.positions)]
                        for point in trajectory.points],
         })
@@ -3718,7 +3849,7 @@ class WaypointUiBridge(Node):
                     raise InterruptedError('사용자가 waypoint 실행을 중지했습니다.')
                 self._send_stream_message({'type': 'go'})
                 deadline = time.monotonic() + max(
-                    30.0, self._trajectory_time(trajectory.points[-1]) * 4 + 10)
+                    30.0, float(message['duration_s']) * 4 + 10)
             elif kind == 'done':
                 if stop_sent or self.execution_stop.is_set():
                     raise InterruptedError('사용자가 waypoint 실행을 중지했습니다.')
@@ -3733,12 +3864,18 @@ class WaypointUiBridge(Node):
         arm: str,
         trajectory: JointTrajectory,
         initial_pair: dict[str, list[float]],
+        before_stream=None,
+        start_speed_scale=1.0,
     ) -> dict[str, list[float]]:
+        self._validate_command_pair(initial_pair)
+        self._validate_trajectory(arm, trajectory, initial_pair[arm])
         final_pair = {side: list(values) for side, values in initial_pair.items()}
-        transition = smooth_joint_transition(
-            final_pair[arm], list(trajectory.points[0].positions),
-            self.max_joint_step_rad,
-        )
+        transition = self._start_transition(
+            arm, final_pair[arm], list(trajectory.points[0].positions), start_speed_scale)
+        # The isolated worker keeps its hold lease alive during validation of
+        # large plans, and stops that publisher only when streaming is ready.
+        if before_stream is not None:
+            before_stream()
         transition_start = time.monotonic()
         transition_shift = 0.0
         for index, positions in enumerate(transition, start=1):
@@ -3767,14 +3904,19 @@ class WaypointUiBridge(Node):
                     f'trajectory 시작 연결 publish 지연 {schedule_lag:.3f}초가 '
                     '제한을 넘었습니다.')
             final_pair[arm] = positions
+            publish_started = time.monotonic()
             self._publish_waypoint_pair(final_pair)
             # Preserve every bounded command, and move the remaining deadlines
             # by time already spent late. Catch-up bursts can exhaust the
             # scheduler budget on long, densely sampled trajectories.
-            transition_shift += max(0.0, time.monotonic() - target_time)
+            # Publishing occupies part of the next control period. Only a
+            # late start moves the timeline; do not add publish time per sample.
+            transition_shift += max(0.0, publish_started - target_time)
 
         start_time = time.monotonic()
         schedule_shift = 0.0
+        scheduled_elapsed = 0.0
+        previous_point_time = 0.0
         for sample_index, point in enumerate(trajectory.points, start=1):
             self._record_stream_progress(
                 arm, 'trajectory', sample_index, len(trajectory.points),
@@ -3789,7 +3931,11 @@ class WaypointUiBridge(Node):
                     f'WAYPOINT 제어권이 해제되었습니다: '
                     f'mode={arbiter_mode}, fault={arbiter_fault or "none"}'
                 )
-            target_time = start_time + schedule_shift + self._trajectory_time(point)
+            point_time = self._trajectory_time(point)
+            scheduled_elapsed += max(
+                1.0 / self.control_rate_hz, point_time - previous_point_time)
+            previous_point_time = point_time
+            target_time = start_time + schedule_shift + scheduled_elapsed
             while True:
                 remaining = target_time - time.monotonic()
                 if remaining <= 0.0:
@@ -3801,8 +3947,9 @@ class WaypointUiBridge(Node):
                 raise RuntimeError(
                     f'trajectory publish 지연 {schedule_lag:.3f}초가 제한을 넘었습니다.')
             final_pair[arm] = list(point.positions)
+            publish_started = time.monotonic()
             self._publish_waypoint_pair(final_pair)
-            schedule_shift += max(0.0, time.monotonic() - target_time)
+            schedule_shift += max(0.0, publish_started - target_time)
         return final_pair
 
     def _wait_for_arm_target(
@@ -3859,9 +4006,10 @@ class WaypointUiBridge(Node):
         trajectory: JointTrajectory,
         hold: dict[str, list[float]],
         return_mode: str,
+        start_speed_scale=1.0,
     ) -> None:
         try:
-            final_pair = self._stream_trajectory(arm, trajectory, hold)
+            final_pair = self._stream_trajectory(arm, trajectory, hold, start_speed_scale)
             self._wait_for_arm_target(arm, final_pair)
             self._complete_execution(return_mode)
             self._set_status(arm, 'EXECUTION_COMPLETE: teleop handoff ready')
@@ -4340,8 +4488,10 @@ def main(args=None) -> None:
             robot_asset_roots[package_name] = Path(
                 get_package_share_directory(package_name))
         except LookupError:
-            bridge.get_logger().warning(
-                f'{package_name} 패키지가 없어 해당 3D 메쉬는 생략합니다.')
+            # This list covers multiple robot models. SG2 does not use
+            # open_manipulator_description, so its absence is not a warning.
+            bridge.get_logger().debug(
+                f'선택적 3D 메시 패키지가 설치되지 않았습니다: {package_name}')
     handler = type(
         'WaypointApiHandler',
         (ApiHandler,),

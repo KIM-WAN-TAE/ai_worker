@@ -23,6 +23,8 @@ def waypoint_file(arm='left', name='A'):
 @pytest.fixture
 def bridge():
     b = object.__new__(MODULE.WaypointUiBridge)
+    from ament_index_python.packages import get_package_share_directory
+    b.robot_description_xml = (Path(get_package_share_directory('ffw_description')) / 'urdf/ffw_sg2_rev1_follower/ffw_sg2_follower.urdf').read_text()
     b.default_arm = 'left'
     b.available_arms = ['left', 'right']
     b.lock = threading.RLock()

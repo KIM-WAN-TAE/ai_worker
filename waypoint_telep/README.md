@@ -61,7 +61,8 @@ waypoint는 입력 관절값을 정확히 통과하면서 속도를 이어 갑�
 quintic joint 보간으로 자동 정렬하므로, 사용자가 첫 waypoint 자세를 미리 맞출 필요가
 없습니다.
 
-UI 실행기는 허용 범위 안에서 발생한 publish 지연만큼 이후 명령의 전송 시각을 늦춥니다.
+UI 실행기는 허용 범위 안에서 발생한 publish 시작 지연만큼 이후 명령의 전송 시각을 늦춥니다.
+publish 함수의 처리 시간은 제어 주기 안에 포함하며, 매 샘플마다 별도 대기 시간으로 더하지 않습니다.
 긴 trajectory에서 밀린 명령이 한꺼번에 전송되거나 작은 지연이 누적되는 일을 줄이기
 위한 처리입니다. 관절 명령을 건너뛰지 않으며, 부하가 있으면 실제 실행 시간은 Preview보다
 길어질 수 있습니다. 단일 전송 지연이 `max_schedule_lag_s`를 넘거나 제어권이 해제된
@@ -530,9 +531,14 @@ AI Worker 컨테이너 안에서 실행합니다.
 
 ```bash
 cd /root/ros2_ws
-colcon build --symlink-install --packages-select waypoint_telep
+colcon build --symlink-install --packages-select ffw_description waypoint_telep
 source install/setup.bash
 ```
+
+UI와 planner는 실행 중인 `/robot_description`을 사용합니다. SG2 bringup에서는
+`ffw_sg2_follower` 모델을 참조하며, 3D 메시는 설치된 `ffw_description`에서 제공합니다.
+소스 업데이트 후에는 위 명령으로 메시 패키지도 함께 빌드해야 최신 URDF의 메시 경로가
+반영됩니다. SG2에는 `open_manipulator_description`이 필요하지 않습니다.
 
 ## Preview-only 실행
 
@@ -719,10 +725,25 @@ ros2 launch waypoint_telep waypoint_telep.launch.py publish_enabled:=true
 
 브라우저에서 waypoint를 Preview로 확인한 뒤 `실제 실행`을 사용합니다. 정상 경로는
 `TELEOP → WAYPOINT → TELEOP` 또는 `NONE → WAYPOINT → NONE`으로 전환됩니다.
-현재 자세와 선택한 시작 waypoint의 차이가 커서 일반 경로 계산이 관절 간격 제한으로
-거부되면 `시작점 저속 정렬 후 실행`을 사용할 수 있습니다. 이 실행은 현재 자세에서 첫
-waypoint까지의 속도 배율만 `slow_start_speed_scale` 이하로 제한합니다. 첫 waypoint에
+현재 자세에서 선택한 시작 waypoint까지의 초기 정렬은 저장된 구간 속도 배율이 높아도
+최대 1배로 제한합니다. 부분 구간을 선택한 상태의 미리보기와 시간 배정 검증에도
+같은 제한을 적용하며, 이후 구간의 배율과 배정 시간은 유지합니다.
+`시작점 저속 정렬 후 실행`은 현재 자세에서 첫
+waypoint까지의 속도 배율만 `slow_start_speed_scale`(기본 0.2배) 이하로 제한합니다.
+실행 직전 hold 자세에서 첫 명령 샘플로 연결하는 구간도 같은 배율을 적용합니다.
+기본 YAML에서는 시작 정렬의 기준 속도가 20 mm/s, 관절·그리퍼는 0.2 rad/s입니다. 첫 waypoint에
 도착한 뒤에는 각 waypoint에 저장된 원래 속도 배율을 사용합니다.
+
+UI 실행은 `control_rate_hz` 이하(최대 100 Hz)로 모든 경로 샘플을 순서대로
+발행합니다. 그보다 촘촘한 샘플은 생략하지 않고 발행 간격을 늘리므로 실제 실행은
+미리보기의 계획 시간보다 길어질 수 있습니다. 경로의 샘플 간 이동량뿐 아니라
+`이동량 / 시간 간격`도 검사하며, 팔 또는 그리퍼의 URDF 속도 제한을 넘으면
+실행을 거부합니다. 현재 hold 자세에서 계획의 첫 샘플까지 연결할 때는
+`joint_speed_radps`와 `gripper_speed_radps`(기본 YAML에서 각각 1.00 rad/s), URDF 속도 제한,
+`max_joint_step_rad`를 모두 적용합니다.
+기본 YAML의 선속도는 0.10 m/s, 각속도는 1.00 rad/s, 구간 최소시간은 0.10초입니다.
+파일에 저장된 개별 배속·대기시간·끝단 등속 설정은 별도로 적용됩니다.
+
 `/waypoint_telep/{arm}/execute`의 직접 action 실행은 기본적으로 비활성화되어 있습니다.
 이는 recorder가 학습용 action으로 사용하는 최종 command topic에 실행 구간이 빠지는 것을
 막기 위한 설정입니다.
@@ -767,3 +788,22 @@ UI는 초기 로딩과 waypoint 변경 시에만 전체 계획을 읽습니다. 
 
 학습용 action은 기존 F2 계약대로 위의 최종 좌·우 command topic을 사용합니다. sparse
 waypoint와 `planned_trajectory`는 계획 및 진단 정보이며 action label을 대체하지 않습니다.
+
+
+전체 목표시간의 기본 모드인 **실행 시간 기준**은 첫 지점 도착부터 마지막 지점까지
+명령 전송에 필요한 시간을 맞춥니다. 초기 자세 정렬은 별도이며 대기시간은 포함합니다.
+구간 시간을 제어 주기의 정수 배로 배정하고 실제 샘플의 전송 간격으로 다시 검증합니다.
+100 Hz에서는 목표시간을 0.01초 단위로 입력합니다. 관절 속도·위치·샘플 간격 검증이나
+시간 검증에 실패하면 기존 설정을 유지합니다. 모든 waypoint와 대기는 유지되며 구간별
+속도 배율은 변경됩니다. 끝단 등속은 기존의 별도 모드로 선택할 수 있습니다.
+실제 동작 완료 시각에는 운영체제 지연과 로봇 추종 시간이 추가될 수 있습니다.
+
+실행 시간 배정으로 전환할 때는 기존 끝단 등속 시간축을 제거한 기준 경로를 사용합니다.
+팔과 그리퍼의 구간별 이동량으로 필요한 최소 전송 주기를 먼저 확보한 뒤 남은 시간을
+분배합니다. 이동량이 작은 연속 구간은 한 전송 주기를 사용할 수 있으며, 생성된 모든
+샘플은 관절 속도·이동량 제한을 다시 검사합니다.
+
+실행 시간 기준은 남은 시간을 끝단의 구간별 이동거리에 비례하도록 분배합니다.
+각 구간의 관절 보간을 FK로 평가해 이동거리를 구하며, 관절 제한으로 필요한 최소
+시간을 먼저 확보합니다. 따라서 점 간격이 큰 하강 구간에 짧은 시간이 균등 배정되는
+문제를 피합니다. 제어 주기, 정지·그리퍼 구간과 관절 제한 때문에 완전한 등속은 아닙니다.

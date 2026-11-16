@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed arm command-source arbiter for F2 policy/teleoperation handoff."""
+"""Fail-closed arm command-source arbiter for F2/SG2 policy/teleoperation handoff."""
 
 from __future__ import annotations
 
@@ -137,6 +137,19 @@ class CommandSourceArbiterCore:
             active_source = self.source_for_arm(self.mode, arm)
         if error and active_source == source:
             self.latch_fault(f"{source.lower()} {arm}: {error}")
+        elif active_source == source and self._pair_skew_started_s is not None:
+            # Paired commands arrive in separate callbacks. A complete pair
+            # can recover and the next pair can start between watchdog ticks.
+            # Clear the continuity timer at receipt, otherwise two unrelated
+            # transient skews are mistaken for one sustained failure.
+            pair = [
+                self.samples[self.source_for_arm(self.mode, side)][side]
+                for side in ARMS
+            ]
+            if all(not item.error and item.seen_s is not None for item in pair):
+                seen = [item.seen_s for item in pair]
+                if max(seen) - min(seen) <= self.max_pair_skew_s:
+                    self._pair_skew_started_s = None
         return not error
 
     def _validate(self, arm: str, msg: JointTrajectory) -> str:
@@ -309,12 +322,16 @@ class CommandSourceArbiterCore:
         sources = {}
         for mode in COMMAND_MODES:
             ready, reason = self.readiness(mode, now_s)
-            sources[mode.lower()] = {"ready": ready, "reason": reason}
+            sources[mode.lower()] = {"ready": ready, "reason": reason, "positions": {
+                arm: (list(self.samples[mode][arm].message.points[0].positions)
+                      if self.samples[mode][arm].message is not None else None)
+                for arm in ARMS
+            }}
         return {"mode": self.mode, "fault": self.fault, "sources": sources}
 
 
 class CommandSourceArbiter(Node):
-    """Sole publisher to the F2 arm controller input topics."""
+    """Sole publisher to the F2/SG2 arm controller input topics."""
 
     DEFAULT_JOINTS = {
         "left": [
@@ -354,13 +371,28 @@ class CommandSourceArbiter(Node):
         ],
     }
 
+    # SG2 PH42 J7 encoder limits differ from F2 on both arms.
+    SG2_POSITION_LIMITS = copy.deepcopy(F2_POSITION_LIMITS)
+    for _arm_limits in SG2_POSITION_LIMITS.values():
+        _arm_limits[6] = (-151875 * 2 * math.pi / 607500,
+                          131875 * 2 * math.pi / 607500)
+    del _arm_limits
+    POSITION_LIMITS_BY_MODEL = {"f2": F2_POSITION_LIMITS, "sg2": SG2_POSITION_LIMITS}
+
     def __init__(self) -> None:
         super().__init__("command_source_arbiter")
+        self.declare_parameter("robot_model", "f2")
+        model = str(self.get_parameter("robot_model").value)
+        if model not in self.POSITION_LIMITS_BY_MODEL:
+            raise ValueError(f"unsupported arbiter robot model: {model}")
         self.declare_parameter("max_source_age_s", 0.25)
         self.declare_parameter("max_pair_skew_s", 0.05)
         self.declare_parameter("max_command_lease_s", 60.0)
         self.declare_parameter("command_lease_grace_s", 0.1)
         self.declare_parameter("policy_trajectory_completion_grace_s", 5.0)
+        # Allows a maintenance restart to preserve an existing safety latch.
+        # It never selects a command source; clearing still requires clear_fault.
+        self.declare_parameter("startup_fault", "")
         self.declare_parameter("manage_leader_service", True)
         self.declare_parameter("leader_service_name", "avatar_bringup")
         self.declare_parameter("policy_left_topic", "/intervention/policy/arm_left")
@@ -407,8 +439,11 @@ class CommandSourceArbiter(Node):
                     "policy_trajectory_completion_grace_s"
                 ).value
             ),
-            position_limits=self.F2_POSITION_LIMITS,
+            position_limits=self.POSITION_LIMITS_BY_MODEL[model],
         )
+        startup_fault = str(self.get_parameter("startup_fault").value)
+        if startup_fault:
+            self.core.latch_fault(startup_fault)
         self._intervention_enabled = False
         self._source_topics = {
             MODE_POLICY: {

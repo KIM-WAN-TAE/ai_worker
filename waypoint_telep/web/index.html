@@ -368,7 +368,8 @@
         <div class="equal-time-controls">
           <label>시간 기준
             <select id="equalTimeMode">
-              <option value="total">전체 목표시간 · 끝단 등속</option>
+              <option value="total">전체 목표시간 · 실행 시간 기준</option>
+              <option value="uniform">전체 목표시간 · 끝단 등속</option>
               <option value="segment">구간당 동일 시간</option>
             </select>
           </label>
@@ -382,8 +383,8 @@
           <button id="equalTimeExcept" class="button secondary">선택 구간 제외하고 적용</button>
           <button id="clearUniformTime" class="button ghost" type="button">기존 구간별 속도 사용</button>
         </div>
-        <p>전체 목표시간 모드는 실제 끝단 이동 거리를 기준으로 속도를 고르게 맞춥니다. JOINT 연속 통과와 ‘부드럽게 연결’ 모두 지원하며, 검증된 경로 모양과 구간별 속도 배율은 유지하고 시간축만 조절합니다. 출발·정지, 방향 전환과 관절 제한 때문에 필요한 곳에서 감속합니다.</p>
-        <p>전체 시간은 첫 waypoint 도착부터 마지막 지점의 대기 종료까지이며, 현재 자세에서 첫 지점으로 정렬하는 시간은 별도입니다. 대기와 제외 구간의 기존 시간을 유지합니다. 제외 번호는 하나의 연속 범위로 지정하세요. 225번 제외는 224→225 이동을 뜻합니다. 목표시간을 맞출 수 없으면 기존 설정을 유지합니다. ‘구간당 동일 시간’은 거리와 무관하게 시간을 나누는 별도 모드입니다. 계산·검증은 로봇을 움직이지 않습니다.</p>
+        <p>‘실행 시간 기준’은 모든 지점을 유지하고 끝단 이동거리에 비례해 구간 시간을 배정합니다. 관절 제한에 필요한 시간을 먼저 확보하고 명령 전송 주기에 맞춰 조정합니다. 예를 들어 10초를 입력하면 첫 지점부터 마지막 지점까지의 전송 예정 시간을 10초로 검증합니다. 실제 동작 완료에는 시스템 지연과 추종 오차가 추가될 수 있습니다. ‘끝단 등속’은 실제 끝단 이동 거리를 기준으로 속도를 고르게 맞추는 별도 모드입니다. JOINT 연속 통과와 ‘부드럽게 연결’ 모두 지원하며, 검증된 경로 모양과 구간별 속도 배율은 유지하고 시간축만 조절합니다. 출발·정지, 방향 전환과 관절 제한 때문에 필요한 곳에서 감속합니다.</p>
+        <p>전체 시간은 첫 waypoint 도착부터 마지막 지점의 대기 종료까지이며, 현재 자세에서 첫 지점으로 정렬하는 시간은 별도입니다. 대기와 제외 구간의 기존 시간을 유지합니다. 끝단 등속 모드에서 제외 번호는 하나의 연속 범위로 지정하세요. 225번 제외는 224→225 이동을 뜻합니다. 목표시간을 맞출 수 없으면 기존 설정을 유지합니다. ‘구간당 동일 시간’은 거리와 무관하게 시간을 나누는 별도 모드입니다. 계산·검증은 로봇을 움직이지 않습니다.</p>
         <p id="equalTimeResult" role="status" aria-live="polite">시간 배정 후 검증 결과가 여기에 표시됩니다.</p>
       </div>
       <div id="waypointList" class="waypoint-list">
@@ -418,9 +419,9 @@
     <section class="panel simulation-panel">
       <div class="panel-heading simulation-heading">
         <div>
-          <span class="eyebrow">F2 URDF SIMULATION</span>
+          <span class="eyebrow">ROBOT URDF SIMULATION</span>
           <h2>로봇 경로 시뮬레이션</h2>
-          <p id="modelMeta">Cyclo와 동일한 F2 전체 URDF·mesh를 불러오는 중입니다.</p>
+          <p id="modelMeta">Cyclo와 동일한 로봇 전체 URDF·mesh를 불러오는 중입니다.</p>
         </div>
         <div class="simulation-actions">
           <button id="resetView" class="button ghost">시점 초기화</button>
@@ -431,12 +432,12 @@
         <div class="simulation-stage">
           <canvas id="robotSimulation" height="430"></canvas>
           <div id="simulationEmpty" class="simulation-empty">
-            <strong>F2 전체 URDF를 기다리고 있습니다.</strong>
+            <strong>로봇 전체 URDF를 기다리고 있습니다.</strong>
             <span>/robot_description과 mesh가 준비되면 전체 로봇 자세가 표시됩니다.</span>
           </div>
           <div id="viewHelp" class="view-help">빈 공간 드래그: 시점 회전 · 휠: 확대/축소</div>
           <div class="simulation-legend">
-            <span><i class="legend-link"></i>F2 URDF mesh</span>
+            <span><i class="legend-link"></i>로봇 URDF mesh</span>
             <span><i class="legend-path"></i>왼팔 경로</span>
             <span><i class="legend-path right"></i>오른팔 경로</span>
             <span><i class="legend-axis-x"></i>X</span>
@@ -488,7 +489,7 @@
         </div>
         <div class="waypoint-joint-values" id="waypointJointValues"></div>
       </div>
-      <p class="simulation-note">Cyclo Intelligence와 동일한 F2 URDF·STL mesh 및 joint 적용 방식을 사용합니다. Mesh를 표시하지만 self-collision 및 주변 물체 충돌은 검사하지 않습니다.</p>
+      <p class="simulation-note">Cyclo Intelligence와 동일한 로봇 URDF·STL mesh 및 joint 적용 방식을 사용합니다. Mesh를 표시하지만 self-collision 및 주변 물체 충돌은 검사하지 않습니다.</p>
     </section>
 
     <section class="panel preview-panel">

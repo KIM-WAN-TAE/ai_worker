@@ -2,6 +2,7 @@ import importlib.util
 import math
 from pathlib import Path
 import subprocess
+import sys
 import threading
 import xml.etree.ElementTree as ET
 
@@ -16,6 +17,16 @@ SCRIPT = Path(__file__).parents[1] / 'scripts' / 'waypoint_telep_ui.py'
 SPEC = importlib.util.spec_from_file_location('waypoint_telep_ui', SCRIPT)
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
+
+
+@pytest.fixture(autouse=True)
+def robot_description_for_unit_bridges(monkeypatch):
+    # Unit bridges bypass __init__; provide a real URDF instead of implicit F2 limits.
+    path = Path(get_package_share_directory('ffw_description')) / 'urdf/ffw_f2_follower/ffw_f2_follower.urdf'
+    monkeypatch.setattr(MODULE.WaypointUiBridge, 'robot_description_xml', path.read_text(), raising=False)
+    monkeypatch.setattr(MODULE.WaypointUiBridge, 'joint_speed_radps', 0.2, raising=False)
+    monkeypatch.setattr(MODULE.WaypointUiBridge, 'gripper_speed_radps', 0.2, raising=False)
+
 
 
 def test_interpolated_flags_preserve_explicit_origins_and_recognize_legacy_names():
@@ -202,11 +213,11 @@ def test_joint_timing_supports_faster_tcp_speeds_and_configured_ceiling():
         MODULE.parse_joint_timing(timing, 350, maximum_speed_mps=0.1)
 
 
-def _expanded_f2_description():
+def _expanded_f2_description(model='f2'):
     description_share = Path(get_package_share_directory('ffw_description'))
     xacro_path = (
-        description_share / 'urdf' / 'ffw_f2_follower' /
-        'ffw_f2_follower.urdf.xacro'
+        description_share / 'urdf' / ('ffw_f2_follower' if model == 'f2' else 'ffw_sg2_rev1_follower') /
+        f'ffw_{model}_follower.urdf.xacro'
     )
     completed = subprocess.run(
         ['xacro', str(xacro_path)],
@@ -217,8 +228,9 @@ def _expanded_f2_description():
     return ET.fromstring(completed.stdout)
 
 
-def test_f2_urdf_arbiter_and_waypoint_limits_share_one_safe_contract():
-    root = _expanded_f2_description()
+@pytest.mark.parametrize('model', ['f2', 'sg2'])
+def test_urdf_arbiter_and_waypoint_limits_share_one_safe_contract(model):
+    root = _expanded_f2_description(model)
     urdf_limits = {}
     for joint in root.findall('joint'):
         name = joint.get('name', '')
@@ -238,8 +250,8 @@ def test_f2_urdf_arbiter_and_waypoint_limits_share_one_safe_contract():
             urdf_limits[f'arm_{arm_letter}_joint{index}']
             for index in range(1, 8)
         ] + [urdf_limits[f'gripper_{arm_letter}_joint1']]
-        assert MODULE.F2_POSITION_LIMITS[side] == pytest.approx(expected)
-        assert CommandSourceArbiter.F2_POSITION_LIMITS[side] == pytest.approx(expected)
+        assert MODULE.urdf_position_limits(ET.tostring(root, encoding='unicode'), side) == pytest.approx(expected)
+        assert CommandSourceArbiter.POSITION_LIMITS_BY_MODEL[model][side] == pytest.approx(expected)
 
     # The arm software envelope must never exceed the configured motor limits.
     gpio = {element.get('name'): element for element in root.findall('.//gpio')}
@@ -437,7 +449,8 @@ def test_parse_speed_scale_defaults_to_one_and_bounds_value():
 def test_smooth_joint_transition_keeps_every_command_within_step_limit():
     start = [0.0, -0.2, 0.4]
     target = [0.14, -0.28, 0.4]
-    points = MODULE.smooth_joint_transition(start, target, 0.05)
+    points = MODULE.smooth_joint_transition(
+        start, target, 0.05, velocity_limits=[0.2, 0.1, 0.2], rate_hz=100.0)
 
     assert points
     assert points[-1] == pytest.approx(target)
@@ -445,7 +458,14 @@ def test_smooth_joint_transition_keeps_every_command_within_step_limit():
         assert max(
             abs(value - old) for value, old in zip(point, previous)
         ) <= 0.05 + 1.0e-12
-    assert MODULE.smooth_joint_transition(start, [0.01, -0.2, 0.4], 0.05) == []
+        assert all(abs(value - old) * 100 <= limit + 1e-12
+                   for value, old, limit in zip(point, previous, [0.2, 0.1, 0.2]))
+    short = MODULE.smooth_joint_transition(
+        start, [0.01, -0.2, 0.4], 0.05, velocity_limits=[0.2] * 3, rate_hz=100.0)
+    assert short[-1] == pytest.approx([0.01, -0.2, 0.4])
+    assert len(short) >= 5
+    assert MODULE.smooth_joint_transition(
+        start, start, 0.05, velocity_limits=[0.2] * 3, rate_hz=100.0) == []
 
 
 def test_plan_validation_bridges_start_gap_but_rejects_internal_jump():
@@ -492,6 +512,133 @@ def test_continuous_joint_plan_allows_first_waypoint_gap():
     trajectory.points = [point]
 
     bridge._validate_plan('left', trajectory, [0.0] * 8)
+
+
+@pytest.mark.parametrize('joint_index', [0, 7])
+def test_stream_rejects_overspeed_before_any_command(joint_index):
+    bridge = object.__new__(MODULE.WaypointUiBridge)
+    bridge.max_joint_step_rad = 0.05
+    bridge.control_rate_hz = 100.0
+    sent = []
+    bridge._publish_waypoint_pair = sent.append
+    trajectory = JointTrajectory()
+    trajectory.joint_names = MODULE.command_joint_names('left')
+    for stamp, value in [(1_000_000, 0.20), (2_000_000, 0.24)]:
+        point = JointTrajectoryPoint()
+        point.positions = [0.0] * 8
+        point.positions[joint_index] = value
+        point.time_from_start.nanosec = stamp
+        trajectory.points.append(point)
+    with pytest.raises(RuntimeError, match='속도 .*URDF 제한'):
+        bridge._stream_trajectory_local(
+            'left', trajectory, {'left': [0.0] * 8, 'right': [0.0] * 8},
+            before_stream=lambda: sent.append('hold stopped'))
+    assert sent == []
+
+
+@pytest.mark.parametrize('rate_hz', [25.0, 100.0])
+def test_subperiod_samples_are_preserved_at_configured_rate(monkeypatch, rate_hz):
+    clock = [0.0]
+    monkeypatch.setattr(MODULE.time, 'monotonic', lambda: clock[0])
+
+    class Stop:
+        def is_set(self):
+            return False
+
+        def wait(self, seconds):
+            clock[0] += seconds
+            return False
+
+    bridge = object.__new__(MODULE.WaypointUiBridge)
+    bridge.control_rate_hz = rate_hz
+    bridge.max_schedule_lag_s = 0.05
+    bridge.max_joint_step_rad = 0.05
+    bridge.execution_stop = Stop()
+    bridge.lock = threading.RLock()
+    bridge.arbiter_mode = 'WAYPOINT'
+    bridge.arbiter_fault = ''
+    sent = []
+    bridge._publish_waypoint_pair = lambda pair: sent.append((clock[0], pair['right'][0]))
+    trajectory = JointTrajectory()
+    trajectory.joint_names = MODULE.command_joint_names('right')
+    for index in range(20):
+        point = JointTrajectoryPoint()
+        point.positions = [index * .0001] + [0.0] * 7
+        point.time_from_start.nanosec = (index + 1) * 1_000_000
+        trajectory.points.append(point)
+    duration = bridge._stream_duration_s('right', trajectory, [0.0] * 8)
+    bridge._stream_trajectory_local(
+        'right', trajectory, {'left': [0.0] * 8, 'right': [0.0] * 8})
+    assert len(sent) == 20
+    assert [value for _, value in sent] == [point.positions[0] for point in trajectory.points]
+    assert min(b[0] - a[0] for a, b in zip(sent, sent[1:])) >= 1 / rate_hz - 1e-9
+    assert clock[0] == pytest.approx(duration)
+    assert duration == pytest.approx(20 / rate_hz)
+
+
+@pytest.mark.parametrize('bad_velocity', [None, '0', '-1', 'nan', 'inf'])
+def test_velocity_limits_fail_closed_for_arm_and_gripper(bad_velocity):
+    bridge = object.__new__(MODULE.WaypointUiBridge)
+    for name in ('arm_l_joint1', 'gripper_l_joint1'):
+        root = ET.fromstring(bridge.robot_description_xml)
+        limit = next(j for j in root.findall('joint') if j.get('name') == name).find('limit')
+        if bad_velocity is None:
+            limit.attrib.pop('velocity')
+        else:
+            limit.set('velocity', bad_velocity)
+        with pytest.raises(ValueError):
+            MODULE.urdf_velocity_limits(ET.tostring(root, encoding='unicode'), 'left')
+
+
+def test_start_connection_honors_configured_and_urdf_speed_for_small_gaps():
+    bridge = object.__new__(MODULE.WaypointUiBridge)
+    bridge.control_rate_hz = 100.0
+    bridge.max_joint_step_rad = .05
+    bridge.joint_speed_radps = .2
+    bridge.gripper_speed_radps = .1
+    start = [0.0] * 8
+    target = [.2] + [0.0] * 6 + [.01]
+    points = bridge._start_transition('left', start, target)
+    assert len(points) / 100 >= 1.0
+    assert points[-1] == pytest.approx(target)
+    for previous, point in zip([start, *points[:-1]], points):
+        assert abs(point[0] - previous[0]) * 100 <= .2 + 1e-9
+        assert abs(point[7] - previous[7]) * 100 <= .1 + 1e-9
+    bridge.joint_speed_radps = 100.0
+    bridge.max_joint_step_rad = 1.0
+    points = bridge._start_transition('left', start, target)
+    limit = bridge._velocity_limits('left')[0]
+    assert max(abs(b[0] - a[0]) * 100 for a, b in zip([start, *points[:-1]], points)) <= limit
+
+
+def test_slow_start_connection_limits_arm_and_gripper_to_twenty_percent():
+    bridge = object.__new__(MODULE.WaypointUiBridge)
+    bridge.control_rate_hz = 100.0
+    bridge.max_joint_step_rad = .05
+    bridge.joint_speed_radps = 1.0
+    bridge.gripper_speed_radps = 1.0
+    start = [0.0] * 8
+    target = [.2] + [0.0] * 6 + [.1]
+    regular = bridge._start_transition('left', start, target)
+    slow = bridge._start_transition('left', start, target, start_speed_scale=.2)
+    assert len(slow) >= 4.9 * len(regular)
+    assert slow[-1] == pytest.approx(target)
+    assert max(abs(b-a) * 100 for previous, point in zip([start, *slow[:-1]], slow)
+               for a, b in zip(previous, point)) <= .2 + 1e-9
+    for invalid in (0, -1, 1.1, math.nan, math.inf):
+        with pytest.raises(ValueError):
+            bridge._start_transition('left', start, target, start_speed_scale=invalid)
+
+
+def test_worker_rejects_old_ui_before_creating_ros_publishers():
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT.with_name('waypoint_stream_worker.py')), str(SCRIPT)],
+        input='{"type": "init"}\n', text=True, capture_output=True, timeout=5)
+    assert result.returncode == 0
+    message = MODULE.json.loads(result.stdout)
+    assert message['type'] == 'error'
+    assert '다시 시작' in message['message']
+    assert result.stderr == ''
 
 
 @pytest.mark.parametrize(
@@ -746,7 +893,7 @@ def test_waypoint_stream_keeps_both_recorded_arm_topics_and_returns_teleop():
     statuses = []
     current = {
         'left': [0.02] * 7 + [0.4],
-        'right': [0.1] * 7 + [0.4],
+        'right': [-0.1] * 7 + [0.4],
     }
     bridge._publish_waypoint_pair = lambda pair: published.append({
         arm: list(values) for arm, values in pair.items()
@@ -763,7 +910,7 @@ def test_waypoint_stream_keeps_both_recorded_arm_topics_and_returns_teleop():
     trajectory = JointTrajectory()
     trajectory.joint_names = MODULE.command_joint_names('left')
     for nanoseconds, value, gripper in (
-        (1_000_000, 0.01, 0.35), (2_000_000, 0.02, 0.4)
+        (100_000_000, 0.01, 0.35), (200_000_000, 0.02, 0.4)
     ):
         point = JointTrajectoryPoint()
         point.positions = [value] * 7 + [gripper]
@@ -771,22 +918,22 @@ def test_waypoint_stream_keeps_both_recorded_arm_topics_and_returns_teleop():
         trajectory.points.append(point)
     hold = {
         'left': [0.0] * 7 + [0.3],
-        'right': [0.1] * 7 + [0.4],
+        'right': [-0.1] * 7 + [0.4],
     }
 
     MODULE.WaypointUiBridge._run_waypoint_trajectory(
         bridge, 'left', trajectory, hold, 'TELEOP'
     )
 
-    assert len(published) == 2
+    assert len(published) > 2  # The initial gripper/arm gap is speed limited too.
     assert all(pair['right'] == hold['right'] for pair in published)
-    assert published[0]['left'][-1] == pytest.approx(0.35)
+    assert published[-2]['left'][-1] == pytest.approx(0.35)
     assert published[-1]['left'] == [0.02] * 7 + [0.4]
     assert calls == ['select_relative_teleop']
     assert statuses == [('left', 'EXECUTION_COMPLETE: teleop handoff ready')]
 
 
-@pytest.mark.parametrize('publish_delay', [0.0, 0.025])
+@pytest.mark.parametrize('publish_delay', [0.0, 0.002, 0.025])
 def test_dense_stream_preserves_samples_without_catch_up_bursts(monkeypatch, publish_delay):
     clock = [0.0]
     monkeypatch.setattr(MODULE.time, 'monotonic', lambda: clock[0])
@@ -815,16 +962,21 @@ def test_dense_stream_preserves_samples_without_catch_up_bursts(monkeypatch, pub
 
     bridge._publish_waypoint_pair = publish
     trajectory = JointTrajectory()
+    trajectory.joint_names = MODULE.command_joint_names('right')
     for i in range(500):
         point = JointTrajectoryPoint()
-        point.positions = [i * 0.0001] * 8
+        point.positions = [i * 0.0001] + [0.0] * 7
         point.time_from_start.sec = (i + 1) // 100
         point.time_from_start.nanosec = ((i + 1) % 100) * 10_000_000
         trajectory.points.append(point)
     hold = {'left': [0.1] * 8, 'right': [0.0] * 8}
     result = bridge._stream_trajectory('right', trajectory, hold)
     assert [values for _, values in sent] == [list(p.positions) for p in trajectory.points]
-    assert all(b[0] - a[0] >= .01 + publish_delay - 1e-9 for a, b in zip(sent, sent[1:]))
+    # Each publish starts no faster than 100 Hz. Publish cost belongs inside
+    # that period, not in an extra delay added to every subsequent command.
+    assert all(b[0] - a[0] >= .01 - 1e-9 for a, b in zip(sent, sent[1:]))
+    expected_interval = max(.01, publish_delay)
+    assert sent[-1][0] == pytest.approx(.01 + 499 * expected_interval)
     assert result['right'] == list(trajectory.points[-1].positions)
     assert result['left'] == hold['left']
 
@@ -853,6 +1005,7 @@ def test_dense_stream_keeps_stop_ownership_and_large_delay_checks(monkeypatch, f
     sent = []
     bridge._publish_waypoint_pair = lambda pair: sent.append(pair)
     trajectory = JointTrajectory()
+    trajectory.joint_names = MODULE.command_joint_names('right')
     point = JointTrajectoryPoint()
     point.positions = [0.0] * 8
     point.time_from_start.nanosec = 10_000_000
@@ -1673,3 +1826,22 @@ def test_full_snapshot_formats_trajectory_without_holding_command_lock():
         request.join(timeout=2.0)
     assert not request.is_alive()
     assert errors == []
+
+
+def test_missing_urdf_never_falls_back_to_f2_limits():
+    with pytest.raises(ValueError):
+        MODULE.urdf_position_limits('', 'left')
+
+
+def test_sg2_rejects_f2_only_wrist_position():
+    from ffw_bringup.command_source_arbiter import CommandSourceArbiterCore, MODE_POLICY
+    limits = CommandSourceArbiter.SG2_POSITION_LIMITS
+    core = CommandSourceArbiterCore(CommandSourceArbiter.DEFAULT_JOINTS, position_limits=limits)
+    for arm in ('left', 'right'):
+        command = JointTrajectory()
+        command.joint_names = CommandSourceArbiter.DEFAULT_JOINTS[arm]
+        point = JointTrajectoryPoint()
+        point.positions = [0.] * 8
+        point.positions[6] = 1.5  # Within F2, outside SG2 PH42 configured bounds.
+        command.points = [point]
+        assert not core.update(MODE_POLICY, arm, command, 1.)

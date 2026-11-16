@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>official_relative_teleop</name>
+  <version>0.1.0</version>
+  <description>Official Cyclo relative-pose control for the installed SG2 and Mini Leader.</description>
+  <maintainer email="robotis@localhost.localdomain">Robotis workspace</maintainer>
+  <license>Apache-2.0</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <depend>rclcpp</depend><depend>sensor_msgs</depend><depend>std_msgs</depend>
+  <exec_depend>rclpy</exec_depend><exec_depend>std_srvs</exec_depend>
+  <exec_depend>trajectory_msgs</exec_depend><exec_depend>robotis_interfaces</exec_depend>
+  <exec_depend>cyclo_teleoperation</exec_depend>
+  <exec_depend>cyclo_motion_controller_models</exec_depend>
+  <exec_depend>ffw_joint_trajectory_command_broadcaster</exec_depend>
+  <exec_depend>ffw_description</exec_depend><exec_depend>ffw_bringup</exec_depend>
+  <exec_depend>launch_ros</exec_depend><exec_depend>xacro</exec_depend>
+  <export><build_type>ament_cmake</build_type></export>
+</package>

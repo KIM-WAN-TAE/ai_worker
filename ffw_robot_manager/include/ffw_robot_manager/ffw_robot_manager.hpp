@@ -19,6 +19,7 @@
 
 
 #include <algorithm>
+#include <atomic>
 #include <string>
 #include <vector>
 #include <unordered_map>
@@ -131,6 +132,9 @@ protected:
 
   // Track if LED has been set to error state
   bool led_error_set_ = false;
+  // Only update() writes LEDs; callbacks communicate state atomically.
+  std::atomic<bool> watchdog_error_{false};
+  bool watchdog_led_error_ = false;
 
   // Parameter listener and parameters
   std::shared_ptr<ParamListener> param_listener_;
@@ -142,6 +146,10 @@ protected:
   // Battery monitoring
   std::vector<rclcpp::Publisher<sensor_msgs::msg::BatteryState>::SharedPtr> battery_publishers_;
   std::vector<BatteryInfo> battery_configurations_;
+  // update() only samples voltage; ROS publication runs in the node executor.
+  std::vector<std::unique_ptr<std::atomic<double>>> battery_voltages_;
+  std::atomic<bool> battery_samples_active_{false};
+  rclcpp::TimerBase::SharedPtr battery_publish_timer_;
 
   // Robot type configuration
   std::shared_ptr<RobotType> robot_type_;
@@ -186,6 +194,7 @@ protected:
   // Battery monitoring methods
   void setup_battery_monitoring();
   void update_battery_states();
+  void publish_battery_states();
   sensor_msgs::msg::BatteryState create_battery_state(
     double voltage, double soc, const std::string & frame_id);
 };

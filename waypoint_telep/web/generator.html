@@ -110,14 +110,14 @@
             <button id="reset3dView" class="button ghost compact-button" type="button">시점 초기화</button>
           </div>
           <div class="simulation-stage">
-            <canvas id="robotSimulation" height="460" aria-label="기준 경로와 보정 경로의 F2 3D 로봇 시뮬레이션"></canvas>
+            <canvas id="robotSimulation" height="460" aria-label="기준 경로와 보정 경로의 로봇 3D 로봇 시뮬레이션"></canvas>
             <div id="simulationEmpty" class="simulation-empty">
-              <strong>F2 전체 URDF를 기다리고 있습니다.</strong>
+              <strong>로봇 전체 URDF를 기다리고 있습니다.</strong>
               <span>현재 로봇 자세와 mesh를 불러오는 중입니다.</span>
             </div>
             <div class="view-help">빈 공간 드래그: 시점 회전 · 휠: 확대/축소</div>
             <div class="simulation-legend">
-              <span><i class="legend-link"></i>F2 URDF mesh</span>
+              <span><i class="legend-link"></i>로봇 URDF mesh</span>
               <span><i class="legend-reference"></i>기준 경로</span>
               <span><i class="legend-corrected"></i>보정 경로</span>
               <span><i class="legend-axis-x"></i>X</span>
@@ -130,7 +130,7 @@
             <input id="simulationWaypoint" type="range" min="1" max="1" value="1" disabled aria-label="3D로 표시할 waypoint 번호">
             <strong id="simulationWaypointLabel">Waypoint를 불러오세요</strong>
           </div>
-          <div class="model-status"><span id="modelBadge" class="badge waiting">URDF 대기 중</span><p id="modelMeta">Cyclo와 동일한 F2 전체 로봇 모델을 사용합니다.</p></div>
+          <div class="model-status"><span id="modelBadge" class="badge waiting">URDF 대기 중</span><p id="modelMeta">Cyclo와 동일한 로봇 전체 로봇 모델을 사용합니다.</p></div>
           <div id="correctionSummary" class="correction-summary">기준 파일과 보정값을 입력하면 예상 경로가 표시됩니다.</div>
           <div class="generate-actions">
             <button id="generateButton" class="button primary" disabled>보정 · IK · Preview 검증 후 Teleop 적용</button>

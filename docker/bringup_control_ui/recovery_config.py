@@ -37,6 +37,16 @@ class RecoveryGroup:
 # Pose values, joint names, action topics, durations, and tolerances intentionally
 # do not live here.  They are read from the selected model's YAML file.
 RECOVERY_PROFILES: dict[str, dict[str, Any]] = {
+    "sg2": {
+        "config": "ffw_bringup/config/ffw_sg2_rev1_follower/ffw_sg2_follower_initial_positions.yaml",
+        "urdf": "ffw_description/urdf/ffw_sg2_rev1_follower/ffw_sg2_follower.urdf",
+        "executors": {
+            "arm_l_joint_trajectory_executor": "왼팔",
+            "arm_r_joint_trajectory_executor": "오른팔",
+            "head_joint_trajectory_executor": "헤드",
+            "lift_joint_trajectory_executor": "리프트",
+        },
+    },
     "f2": {
         "config": "ffw_bringup/config/ffw_f2_follower/ffw_f2_follower_initial_positions.yaml",
         "urdf": "ffw_description/urdf/ffw_f2_follower/ffw_f2_follower.urdf",
